@@ -47,8 +47,9 @@ def main():
     # Load dataset metadata for the ARX dual-arm carpet folding dataset
     dataset_repo_id = "kelvinzhaozg/arx_dual_arm_carpet_fold_combined"
     print(f"Loading dataset metadata from {dataset_repo_id}")
-    
+
     dataset_metadata = LeRobotDatasetMetadata(dataset_repo_id)
+    print(f"Dataset metadata loaded: {dataset_metadata}, features={dataset_metadata.features}")
     features = dataset_to_policy_features(dataset_metadata.features)
     output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
     input_features = {key: ft for key, ft in features.items() if key not in output_features}
@@ -63,15 +64,11 @@ def main():
         # Multi-camera configuration
         vision_backbone="resnet18",
         crop_shape=(224, 224),  # Crop from 240x424 to 224x224
-        crop_is_random=True,
         use_separate_rgb_encoder_per_camera=True,  # Important for multi-camera setup
-        pretrained_backbone_weights="IMAGENET1K_V1",
-        use_group_norm=True,
-        spatial_softmax_num_keypoints=32,
         # Diffusion model configuration
-        n_obs_steps=2,  # Use 2 observation steps
-        horizon=16,     # 16-step action horizon
-        n_action_steps=8,  # Execute 8 actions per policy call
+        n_obs_steps=2,  # Use 1 observation steps (matches default delta indices)
+        horizon=32,  # 32-step action horizon
+        n_action_steps=16,  # Execute 16 actions per policy call
         # U-Net architecture
         down_dims=(512, 1024, 2048),
         kernel_size=5,
@@ -79,7 +76,7 @@ def main():
         diffusion_step_embed_dim=128,
         use_film_scale_modulation=True,
         # Noise scheduler
-        noise_scheduler_type="DDPM",
+        noise_scheduler_type="DDIM",
         num_train_timesteps=100,
         beta_schedule="squaredcos_cap_v2",
         beta_start=0.0001,
@@ -110,22 +107,22 @@ def main():
 
     delta_timestamps = {
         # Multi-camera observations: load previous and current frames
-        "observation.image_base": [i / fps for i in cfg.observation_delta_indices],
-        "observation.image_left_wrist": [i / fps for i in cfg.observation_delta_indices], 
-        "observation.image_right_wrist": [i / fps for i in cfg.observation_delta_indices],
+        "base_image": [i / fps for i in cfg.observation_delta_indices],
+        "left_wrist_image": [i / fps for i in cfg.observation_delta_indices],
+        "right_wrist_image": [i / fps for i in cfg.observation_delta_indices],
         # Robot state: load previous and current state
-        "observation.state": [i / fps for i in cfg.observation_delta_indices],
+        "state": [i / fps for i in cfg.observation_delta_indices],
         # Actions: load action sequence for diffusion supervision
-        "action": [i / fps for i in cfg.action_delta_indices],
+        "actions": [i / fps for i in cfg.action_delta_indices],
     }
 
-    print(f"Delta timestamps configured:")
+    print("Delta timestamps configured:")
     for key, timestamps in delta_timestamps.items():
         print(f"  {key}: {timestamps}")
 
     # Instantiate dataset with delta timestamps configuration
     print("Loading dataset...")
-    dataset = LeRobotDataset(dataset_repo_id, delta_timestamps=delta_timestamps)
+    dataset = LeRobotDataset(dataset_repo_id, delta_timestamps=delta_timestamps, video_backend="pyav")
     print(f"Dataset loaded with {len(dataset)} samples")
 
     # Create optimizer and dataloader
@@ -145,15 +142,42 @@ def main():
     step = 0
     done = False
     total_loss = 0.0
-    
+
     while not done:
         for batch in dataloader:
             # Move batch to device
             batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
-            
+
+            # Map dataset keys to policy expected format
+            policy_batch = {}
+
+            # Map state -> observation.state
+            if "state" in batch:
+                policy_batch["observation.state"] = batch["state"]
+
+            # Map actions -> action
+            if "actions" in batch:
+                policy_batch["action"] = batch["actions"]
+
+            # Create action_is_pad (all False since we have real actions)
+            if "actions" in batch:
+                policy_batch["action_is_pad"] = torch.zeros(
+                    batch["actions"].shape[:-1], dtype=torch.bool, device=device
+                )
+
+            # Copy image observations (keep original key names)
+            for key in batch:
+                if "image" in key:
+                    policy_batch[key] = batch[key]
+
+            # Copy other necessary keys
+            for key in ["timestamp", "frame_index", "episode_index", "index", "task_index"]:
+                if key in batch:
+                    policy_batch[key] = batch[key]
+
             # Forward pass
-            loss, _ = policy.forward(batch)
-            
+            loss, _ = policy.forward(policy_batch)
+
             # Backward pass
             loss.backward()
             optimizer.step()
@@ -164,7 +188,7 @@ def main():
             if step % log_freq == 0:
                 avg_loss = total_loss / max(1, step + 1)
                 print(f"step: {step:6d} | loss: {loss.item():.4f} | avg_loss: {avg_loss:.4f}")
-                
+
                 # Save checkpoint every 5000 steps
                 if step > 0 and step % 5000 == 0:
                     checkpoint_dir = output_directory / f"checkpoint_{step}"
@@ -184,7 +208,7 @@ def main():
 
     # Print training summary
     final_avg_loss = total_loss / training_steps
-    print(f"\nTraining Summary:")
+    print("\nTraining Summary:")
     print(f"  Total steps: {training_steps}")
     print(f"  Final average loss: {final_avg_loss:.4f}")
     print(f"  Model saved to: {output_directory}")
