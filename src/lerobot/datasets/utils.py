@@ -242,7 +242,9 @@ def backward_compatible_episodes_stats(
     return dict.fromkeys(episodes, stats)
 
 
-def load_image_as_numpy(fpath: str | Path, dtype: np.dtype = np.float32, channel_first: bool = True) -> np.ndarray:
+def load_image_as_numpy(
+    fpath: str | Path, dtype: np.dtype = np.float32, channel_first: bool = True
+) -> np.ndarray:
     img = PILImage.open(fpath).convert("RGB")
     img_array = np.array(img, dtype=dtype)
     if channel_first:  # (H, W, C) -> (C, H, W)
@@ -318,7 +320,9 @@ def get_safe_version(repo_id: str, version: str | packaging.version.Version) -> 
     Returns the version if available on repo or the latest compatible one.
     Otherwise, will throw a `CompatibilityError`.
     """
-    target_version = packaging.version.parse(version) if not isinstance(version, packaging.version.Version) else version
+    target_version = (
+        packaging.version.parse(version) if not isinstance(version, packaging.version.Version) else version
+    )
     hub_versions = get_repo_versions(repo_id)
 
     if not hub_versions:
@@ -337,7 +341,9 @@ def get_safe_version(repo_id: str, version: str | packaging.version.Version) -> 
     if target_version in hub_versions:
         return f"v{target_version}"
 
-    compatibles = [v for v in hub_versions if v.major == target_version.major and v.minor <= target_version.minor]
+    compatibles = [
+        v for v in hub_versions if v.major == target_version.major and v.minor <= target_version.minor
+    ]
     if compatibles:
         return_version = max(compatibles)
         if return_version < target_version:
@@ -363,7 +369,9 @@ def get_hf_features_from_features(features: dict) -> datasets.Features:
         elif ft["shape"] == (1,):
             hf_features[key] = datasets.Value(dtype=ft["dtype"])
         elif len(ft["shape"]) == 1:
-            hf_features[key] = datasets.Sequence(length=ft["shape"][0], feature=datasets.Value(dtype=ft["dtype"]))
+            hf_features[key] = datasets.Sequence(
+                length=ft["shape"][0], feature=datasets.Value(dtype=ft["dtype"])
+            )
         elif len(ft["shape"]) == 2:
             hf_features[key] = datasets.Array2D(shape=ft["shape"], dtype=ft["dtype"])
         elif len(ft["shape"]) == 3:
@@ -416,7 +424,9 @@ def hw_to_dataset_features(
     return features
 
 
-def build_dataset_frame(ds_features: dict[str, dict], values: dict[str, Any], prefix: str) -> dict[str, np.ndarray]:
+def build_dataset_frame(
+    ds_features: dict[str, dict], values: dict[str, Any], prefix: str
+) -> dict[str, np.ndarray]:
     frame = {}
     for key, ft in ds_features.items():
         if key in DEFAULT_FEATURES or not key.startswith(prefix):
@@ -484,7 +494,9 @@ def create_empty_dataset_info(
     }
 
 
-def get_episode_data_index(episode_dicts: dict[dict], episodes: list[int] | None = None) -> dict[str, torch.Tensor]:
+def get_episode_data_index(
+    episode_dicts: dict[dict], episodes: list[int] | None = None
+) -> dict[str, torch.Tensor]:
     episode_lengths = {ep_idx: ep_dict["length"] for ep_idx, ep_dict in episode_dicts.items()}
     if episodes is not None:
         episode_lengths = {ep_idx: episode_lengths[ep_idx] for ep_idx in episodes}
@@ -553,7 +565,9 @@ def check_timestamps_sync(
                 "timestamps": [timestamps[idx], timestamps[idx + 1]],
                 "diff": diffs[idx],
                 "episode_index": (
-                    episode_indices[idx].item() if hasattr(episode_indices[idx], "item") else episode_indices[idx]
+                    episode_indices[idx].item()
+                    if hasattr(episode_indices[idx], "item")
+                    else episode_indices[idx]
                 ),
             }
             outside_tolerances.append(entry)
@@ -770,21 +784,19 @@ def validate_feature_dtype_and_shape(name: str, feature: dict, value: np.ndarray
         raise NotImplementedError(f"The feature dtype '{expected_dtype}' is not implemented yet.")
 
 
-def validate_feature_numpy_array(name: str, expected_dtype: str, expected_shape: list[int], value: np.ndarray):
+def validate_feature_numpy_array(
+    name: str, expected_dtype: str, expected_shape: list[int], value: np.ndarray
+):
     error_message = ""
     if isinstance(value, np.ndarray):
         actual_dtype = value.dtype
         actual_shape = value.shape
 
         if actual_dtype != np.dtype(expected_dtype):
-            error_message += (
-                f"The feature '{name}' of dtype '{actual_dtype}' is not of the expected dtype '{expected_dtype}'.\n"
-            )
+            error_message += f"The feature '{name}' of dtype '{actual_dtype}' is not of the expected dtype '{expected_dtype}'.\n"
 
         if actual_shape != expected_shape:
-            error_message += (
-                f"The feature '{name}' of shape '{actual_shape}' does not have the expected shape '{expected_shape}'.\n"
-            )
+            error_message += f"The feature '{name}' of shape '{actual_shape}' does not have the expected shape '{expected_shape}'.\n"
     else:
         error_message += f"The feature '{name}' is not a 'np.ndarray'. Expected type is '{expected_dtype}', but type '{type(value)}' provided instead.\n"
 

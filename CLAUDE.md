@@ -39,6 +39,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Replay demonstrations: `lerobot-replay`
 - Teleoperate robot: `lerobot-teleoperate`
 
+### Remote Policy Inference (Async Server)
+- Start policy server: `python src/lerobot/scripts/server/policy_server.py --host=127.0.0.1 --port=8080`
+- Start robot client: `python src/lerobot/scripts/server/robot_client.py --host=127.0.0.1 --port=8080`
+- Train ARX bimanual policy: `python scripts/train_arx_bimanual_dp.py`
+
 ## Architecture Overview
 
 LeRobot is a comprehensive robotics library with the following main components:
@@ -63,6 +68,7 @@ LeRobot is a comprehensive robotics library with the following main components:
   - Koch: Teleoperation setup
   - HopeJR: Humanoid robot arm and hand
   - LeKiwi: Mobile robot platform
+  - ARX R5 Dual: Bimanual robotic arms for coordinated manipulation
   - Stretch3, ViperX: Research platforms
 
 - **Motors** (`src/lerobot/motors/`): Motor control interfaces
@@ -96,6 +102,8 @@ LeRobot is a comprehensive robotics library with the following main components:
 
 **Plugin System**: Extensible architecture for adding new policies, robots, and environments through configuration files.
 
+**Async/Server Architecture**: Distributed system for remote policy inference using gRPC protocol. Policy server runs ML models while robot clients handle hardware control, enabling separation of compute and control systems.
+
 ## Common Workflows
 
 ### Adding a New Policy
@@ -127,12 +135,22 @@ LeRobot is a comprehensive robotics library with the following main components:
 5. Evaluate checkpoints periodically
 6. Upload best models to hub
 
+### Remote Inference Workflow
+1. Start policy server on compute machine with trained model
+2. Start robot client on control machine connected to hardware
+3. Robot client sends observations to policy server via gRPC
+4. Policy server returns actions for robot execution
+5. Monitor latency and throughput for real-time performance
+
 ## Important Files
 
 - `src/lerobot/__init__.py`: Available components registry
 - `src/lerobot/configs/`: All configuration dataclasses
 - `src/lerobot/scripts/train.py`: Main training pipeline
 - `src/lerobot/scripts/eval.py`: Policy evaluation pipeline
+- `src/lerobot/scripts/server/`: Async policy server and robot client components
+- `scripts/train_arx_bimanual_dp.py`: ARX bimanual training script
+- `third_party/`: External SDKs and dependencies (ARX R5 robot SDK)
 - `pyproject.toml`: Package configuration and dependencies
 - `Makefile`: Test commands and end-to-end workflows
 

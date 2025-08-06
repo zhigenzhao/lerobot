@@ -52,6 +52,7 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
+    arx_r5_dual,
     koch_follower,
     make_robot_from_config,
     so100_follower,
@@ -115,7 +116,8 @@ class RobotClient:
             config.policy_device,
         )
         self.channel = grpc.insecure_channel(
-            self.server_address, grpc_channel_options(initial_backoff=f"{config.environment_dt:.4f}s")
+            self.server_address,
+            grpc_channel_options(initial_backoff=f"{config.environment_dt:.4f}s"),
         )
         self.stub = services_pb2_grpc.AsyncInferenceStub(self.channel)
         self.logger.info(f"Initializing client to connect to server at {self.server_address}")

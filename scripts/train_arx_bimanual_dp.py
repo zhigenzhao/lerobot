@@ -31,7 +31,7 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 
 def main():
     # Create a directory to store the training checkpoint.
-    output_directory = Path("outputs/train/arx_bimanual_diffusion_carpet_fold")
+    output_directory = Path("outputs/train/arx_bimanual_diffusion_carpet_fold_lerobot_keys")
     output_directory.mkdir(parents=True, exist_ok=True)
 
     # Select your device
@@ -51,8 +51,26 @@ def main():
     dataset_metadata = LeRobotDatasetMetadata(dataset_repo_id)
     print(f"Dataset metadata loaded: {dataset_metadata}, features={dataset_metadata.features}")
     features = dataset_to_policy_features(dataset_metadata.features)
-    output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
-    input_features = {key: ft for key, ft in features.items() if key not in output_features}
+    
+    # Map the dataset features to the expected policy format
+    # The dataset has keys like "base_image", "state", "actions" 
+    # but we want the policy to expect "observation.images.base_image", "observation.state", "action"
+    key_mapping = {
+        "base_image": "observation.images.base_image",
+        "left_wrist_image": "observation.images.left_wrist_image", 
+        "right_wrist_image": "observation.images.right_wrist_image",
+        "state": "observation.state",
+        "actions": "action",
+    }
+    
+    remapped_features = {}
+    for old_key, feature_info in features.items():
+        new_key = key_mapping.get(old_key, old_key)
+        remapped_features[new_key] = feature_info
+    
+    # Use the remapped features for policy configuration
+    output_features = {key: ft for key, ft in remapped_features.items() if ft.type is FeatureType.ACTION}
+    input_features = {key: ft for key, ft in remapped_features.items() if key not in output_features}
 
     print(f"Input features: {list(input_features.keys())}")
     print(f"Output features: {list(output_features.keys())}")
@@ -93,8 +111,17 @@ def main():
 
     print(f"Policy configuration created with horizon={cfg.horizon}, n_action_steps={cfg.n_action_steps}")
 
-    # Instantiate policy with config and dataset stats
-    policy = DiffusionPolicy(cfg, dataset_stats=dataset_metadata.stats)
+    # Remap the dataset stats to match the policy feature names
+    remapped_stats = {}
+    for old_key, stats_info in dataset_metadata.stats.items():
+        new_key = key_mapping.get(old_key, old_key)
+        remapped_stats[new_key] = stats_info
+
+    print(f"Original stats keys: {list(dataset_metadata.stats.keys())}")
+    print(f"Remapped stats keys: {list(remapped_stats.keys())}")
+
+    # Instantiate policy with config and remapped dataset stats
+    policy = DiffusionPolicy(cfg, dataset_stats=remapped_stats)
     policy.train()
     policy.to(device)
 
@@ -105,14 +132,15 @@ def main():
     fps = dataset_metadata.fps
     print(f"Dataset FPS: {fps}")
 
+    # Delta timestamps must use the original dataset keys (not the remapped policy keys)
     delta_timestamps = {
-        # Multi-camera observations: load previous and current frames
+        # Multi-camera observations: load previous and current frames (using original keys)
         "base_image": [i / fps for i in cfg.observation_delta_indices],
         "left_wrist_image": [i / fps for i in cfg.observation_delta_indices],
         "right_wrist_image": [i / fps for i in cfg.observation_delta_indices],
-        # Robot state: load previous and current state
+        # Robot state: load previous and current state (using original key)
         "state": [i / fps for i in cfg.observation_delta_indices],
-        # Actions: load action sequence for diffusion supervision
+        # Actions: load action sequence for diffusion supervision (using original key)
         "actions": [i / fps for i in cfg.action_delta_indices],
     }
 
@@ -168,7 +196,7 @@ def main():
             # Copy image observations (keep original key names)
             for key in batch:
                 if "image" in key:
-                    policy_batch[key] = batch[key]
+                    policy_batch[f"observation.images.{key}"] = batch[key]
 
             # Copy other necessary keys
             for key in ["timestamp", "frame_index", "episode_index", "index", "task_index"]:
