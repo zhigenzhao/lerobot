@@ -31,7 +31,7 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 
 def main():
     # Create a directory to store the training checkpoint.
-    output_directory = Path("outputs/train/arx_bimanual_diffusion_carpet_fold_lerobot_keys")
+    output_directory = Path("outputs/train/arx_bimanual_diffusion_carpet_fold_lerobot_keys_2")
     output_directory.mkdir(parents=True, exist_ok=True)
 
     # Select your device
@@ -39,9 +39,9 @@ def main():
     print(f"Using device: {device}")
 
     # Training configuration
-    training_steps = 100000  # Increase for full training
-    log_freq = 100
-    batch_size = 32
+    training_steps = 500000  # Increase for full training
+    log_freq = 500
+    batch_size = 64
     learning_rate = 1e-4
 
     # Load dataset metadata for the ARX dual-arm carpet folding dataset
@@ -51,23 +51,23 @@ def main():
     dataset_metadata = LeRobotDatasetMetadata(dataset_repo_id)
     print(f"Dataset metadata loaded: {dataset_metadata}, features={dataset_metadata.features}")
     features = dataset_to_policy_features(dataset_metadata.features)
-    
+
     # Map the dataset features to the expected policy format
-    # The dataset has keys like "base_image", "state", "actions" 
+    # The dataset has keys like "base_image", "state", "actions"
     # but we want the policy to expect "observation.images.base_image", "observation.state", "action"
     key_mapping = {
         "base_image": "observation.images.base_image",
-        "left_wrist_image": "observation.images.left_wrist_image", 
+        "left_wrist_image": "observation.images.left_wrist_image",
         "right_wrist_image": "observation.images.right_wrist_image",
         "state": "observation.state",
         "actions": "action",
     }
-    
+
     remapped_features = {}
     for old_key, feature_info in features.items():
         new_key = key_mapping.get(old_key, old_key)
         remapped_features[new_key] = feature_info
-    
+
     # Use the remapped features for policy configuration
     output_features = {key: ft for key, ft in remapped_features.items() if ft.type is FeatureType.ACTION}
     input_features = {key: ft for key, ft in remapped_features.items() if key not in output_features}
@@ -84,9 +84,9 @@ def main():
         crop_shape=(224, 224),  # Crop from 240x424 to 224x224
         use_separate_rgb_encoder_per_camera=True,  # Important for multi-camera setup
         # Diffusion model configuration
-        n_obs_steps=2,  # Use 1 observation steps (matches default delta indices)
+        n_obs_steps=2,  # Use 2 observation steps (matches default delta indices)
         horizon=32,  # 32-step action horizon
-        n_action_steps=16,  # Execute 16 actions per policy call
+        n_action_steps=32,  # Execute 32 actions per policy call
         # U-Net architecture
         down_dims=(512, 1024, 2048),
         kernel_size=5,

@@ -261,7 +261,7 @@ class ARXR5Interface:
             return self.arm.get_joint_positions()
         except Exception as e:
             logger.error(f"Failed to get joint positions: {e}")
-            return [0.0] * 6
+            return [0.0] * 7
 
     def get_joint_velocities(
         self, joint_names: Optional[Union[str, List[str]]] = None
@@ -283,7 +283,7 @@ class ARXR5Interface:
             return self.arm.get_joint_velocities()
         except Exception as e:
             logger.error(f"Failed to get joint velocities: {e}")
-            return [0.0] * 6
+            return [0.0] * 7
 
     def get_joint_currents(
         self, joint_names: Optional[Union[str, List[str]]] = None
@@ -305,7 +305,7 @@ class ARXR5Interface:
             return self.arm.get_joint_currents()
         except Exception as e:
             logger.error(f"Failed to get joint currents: {e}")
-            return [0.0] * 6
+            return [0.0] * 7
 
     def get_ee_pose(self) -> List[float]:
         """

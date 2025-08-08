@@ -27,6 +27,9 @@ from .config_arx_r5_dual import ARXR5DualConfig
 
 logger = logging.getLogger(__name__)
 
+GRIPPER_POS_OPEN = 4.8
+GRIPPER_POS_CLOSE = 0.0
+
 
 class ARXR5Dual(Robot):
     """
@@ -223,12 +226,14 @@ class ARXR5Dual(Robot):
 
         try:
             # Get joint states from both arms
-            left_joint_pos = self.left_arm.get_joint_positions() if self.left_arm else [0.0] * 6
-            right_joint_pos = self.right_arm.get_joint_positions() if self.right_arm else [0.0] * 6
+            left_joint_pos = self.left_arm.get_joint_positions() if self.left_arm else [0.0] * 7
+            right_joint_pos = self.right_arm.get_joint_positions() if self.right_arm else [0.0] * 7
 
-            # Get gripper positions (placeholder for now)
-            left_gripper_pos = 0.0  # Placeholder
-            right_gripper_pos = 0.0  # Placeholder
+            # Get gripper positions
+            left_gripper_pos = left_joint_pos[6]
+            left_gripper_pos = 1 - left_gripper_pos / (GRIPPER_POS_OPEN - GRIPPER_POS_CLOSE)
+            right_gripper_pos = right_joint_pos[6]
+            right_gripper_pos = 1 - right_gripper_pos / (GRIPPER_POS_OPEN - GRIPPER_POS_CLOSE)
 
             # Add individual joint positions
             for i in range(6):
@@ -245,6 +250,8 @@ class ARXR5Dual(Robot):
                     image = camera.read()
                     observation[camera_name] = image
 
+            observation_to_log = {k: v for k, v in observation.items() if not isinstance(v, np.ndarray)}
+            logger.info(f"[get_observation] observation.state: {observation_to_log}")
             return observation
 
         except Exception as e:
@@ -267,6 +274,8 @@ class ARXR5Dual(Robot):
         if not self._is_connected:
             raise DeviceNotConnectedError("Robot not connected")
 
+        logger.info(f"[send_action] action: {action}")
+
         try:
             # Extract individual joint targets
             left_joint_targets = []
@@ -277,7 +286,15 @@ class ARXR5Dual(Robot):
                 right_joint_targets.append(float(action[f"right_joint_{i}.pos"]))
 
             left_gripper_target = float(action["left_gripper.pos"])
+            left_gripper_target = (
+                left_gripper_target * (GRIPPER_POS_CLOSE - GRIPPER_POS_OPEN) + GRIPPER_POS_OPEN
+            )
             right_gripper_target = float(action["right_gripper.pos"])
+            right_gripper_target = (
+                right_gripper_target * (GRIPPER_POS_CLOSE - GRIPPER_POS_OPEN) + GRIPPER_POS_OPEN
+            )
+
+            print(f"Left gripper target: {left_gripper_target}, Right gripper target: {right_gripper_target}")
 
             # Convert to numpy arrays for clipping
             left_joint_targets = np.array(left_joint_targets)

@@ -46,7 +46,7 @@ class ARXR5DualConfig(RobotConfig):
 
     # Gripper limits
     gripper_limits_lower: list[float] = field(default_factory=lambda: [0.0, 0.0])
-    gripper_limits_upper: list[float] = field(default_factory=lambda: [1.0, 1.0])
+    gripper_limits_upper: list[float] = field(default_factory=lambda: [4.8, 4.8])
 
     # Camera configuration with default RealSense cameras
     # Note: Using keys that will map to policy-expected names after hw_to_dataset_features transformation
