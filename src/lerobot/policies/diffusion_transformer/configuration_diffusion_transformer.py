@@ -75,11 +75,13 @@ class DiffusionTransformerConfig(PreTrainedConfig):
             The group sizes are set to be about 16 (to be precise, feature_dim // 16).
         spatial_softmax_num_keypoints: Number of keypoints for SpatialSoftmax.
         use_separate_rgb_encoders_per_camera: Whether to use a separate RGB encoder for each camera view.
-        n_transformer_layers: Number of transformer encoder layers.
+        n_conditioning_layers: Number of transformer encoder layers for processing conditioning (time + observations).
+        n_decoder_layers: Number of transformer decoder layers for generating action sequences.
         n_attention_heads: Number of attention heads in each transformer layer.
         attention_embed_dim: Embedding dimension for transformer attention.
         attention_dropout: Dropout rate for transformer attention and feed-forward layers.
-        use_causal_attention: Whether to use causal (lower-triangular) attention mask.
+        embedding_dropout: Dropout rate for input embeddings and positional embeddings.
+        use_causal_attention: Whether to use causal (lower-triangular) attention mask for action generation.
         diffusion_step_embed_dim: The transformer is conditioned on the diffusion timestep via a small non-linear
             network. This is the output dimension of that network, i.e., the embedding dimension.
         noise_scheduler_type: Name of the noise scheduler to use. Supported options: ["DDPM", "DDIM"].
@@ -128,12 +130,14 @@ class DiffusionTransformerConfig(PreTrainedConfig):
     spatial_softmax_num_keypoints: int = 32
     use_separate_rgb_encoder_per_camera: bool = False
 
-    # Transformer architecture.
-    n_transformer_layers: int = 4
-    n_attention_heads: int = 8
-    attention_embed_dim: int = 256
-    attention_dropout: float = 0.1
-    use_causal_attention: bool = True
+    # Stanford-style encoder-decoder transformer architecture.
+    n_conditioning_layers: int = 2      # Stanford's n_cond_layers for conditioning encoder
+    n_decoder_layers: int = 4          # Stanford's n_layer for action decoder
+    n_attention_heads: int = 8         # Stanford's n_head
+    attention_embed_dim: int = 256     # Stanford's n_emb
+    attention_dropout: float = 0.1     # Stanford's p_drop_attn
+    embedding_dropout: float = 0.1     # Stanford's p_drop_emb
+    use_causal_attention: bool = True  # Stanford's causal_attn (always true for GPT-style)
 
     # Timestep embedding.
     diffusion_step_embed_dim: int = 128
@@ -192,6 +196,15 @@ class DiffusionTransformerConfig(PreTrainedConfig):
 
         if self.attention_dropout < 0.0 or self.attention_dropout >= 1.0:
             raise ValueError(f"`attention_dropout` must be in [0, 1). Got {self.attention_dropout}.")
+        
+        if self.embedding_dropout < 0.0 or self.embedding_dropout >= 1.0:
+            raise ValueError(f"`embedding_dropout` must be in [0, 1). Got {self.embedding_dropout}.")
+        
+        if self.n_conditioning_layers < 0:
+            raise ValueError(f"`n_conditioning_layers` must be non-negative. Got {self.n_conditioning_layers}.")
+        
+        if self.n_decoder_layers <= 0:
+            raise ValueError(f"`n_decoder_layers` must be positive. Got {self.n_decoder_layers}.")
 
     def get_optimizer_preset(self) -> AdamConfig:
         return AdamConfig(
