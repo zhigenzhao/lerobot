@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
-"""Flow Matching Policy using the same UNet as Diffusion Policy but with flow matching instead of diffusion."""
+"""Flow Matching Transformer Policy using the same transformer architecture as Diffusion Transformer 
+but with flow matching instead of diffusion for generative modeling."""
 
 import math
 from collections import deque
@@ -14,7 +15,9 @@ import torchvision
 from torch import Tensor, nn
 
 from lerobot.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
-from lerobot.policies.flow_matching.configuration_flow_matching import FlowMatchingConfig
+from lerobot.policies.flow_matching_transformer.configuration_flow_matching_transformer import (
+    FlowMatchingTransformerConfig,
+)
 from lerobot.policies.normalize import Normalize, Unnormalize
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import (
@@ -25,16 +28,16 @@ from lerobot.policies.utils import (
 )
 
 # Flow matching library imports
-from flow_matching.utils import ModelWrapper
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
+from flow_matching.utils import ModelWrapper
 
 
-class FlowMatchingUNetWrapper(ModelWrapper):
-    """Wrapper for UNet to be compatible with flow_matching library's ModelWrapper interface."""
+class FlowMatchingTransformerWrapper(ModelWrapper):
+    """Wrapper for transformer to be compatible with flow_matching library's ModelWrapper interface."""
 
-    def __init__(self, unet, config):
-        super().__init__(unet)
+    def __init__(self, transformer, config):
+        super().__init__(transformer)
         self.config = config
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, **extras):
@@ -50,18 +53,18 @@ class FlowMatchingUNetWrapper(ModelWrapper):
         return self.model(x, t, global_cond=global_cond)
 
 
-class FlowMatchingPolicy(PreTrainedPolicy):
+class FlowMatchingTransformerPolicy(PreTrainedPolicy):
     """
-    Flow Matching Policy using the same UNet architecture as Diffusion Policy but with flow matching
+    Flow Matching Policy using Transformer architecture as backbone with flow matching
     for generative modeling instead of denoising diffusion.
     """
 
-    config_class = FlowMatchingConfig
-    name = "flow_matching"
+    config_class = FlowMatchingTransformerConfig
+    name = "flow_matching_transformer"
 
     def __init__(
         self,
-        config: FlowMatchingConfig,
+        config: FlowMatchingTransformerConfig,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
         """
@@ -82,7 +85,7 @@ class FlowMatchingPolicy(PreTrainedPolicy):
         # queues are populated during rollout of the policy, they contain the n latest observations and actions
         self._queues = None
 
-        self.flow_matching = FlowMatchingModel(config)
+        self.flow_matching = FlowMatchingTransformerModel(config)
 
         self.reset()
 
@@ -103,7 +106,6 @@ class FlowMatchingPolicy(PreTrainedPolicy):
     def _get_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
         """Stateless method to generate actions from prepared observations."""
         actions = self.flow_matching.generate_actions(batch)
-        # TODO(rcadene): make above methods return output dictionary?
         actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
         return actions
 
@@ -134,17 +136,6 @@ class FlowMatchingPolicy(PreTrainedPolicy):
             copied `n_obs_steps` times to fill the cache).
           - The flow matching model generates `horizon` steps worth of actions.
           - `n_action_steps` worth of actions are actually kept for execution, starting from the current step.
-        Schematically this looks like:
-            ----------------------------------------------------------------------------------------------
-            (legend: o = n_obs_steps, h = horizon, a = n_action_steps)
-            |timestep            | n-o+1 | n-o+2 | ..... | n     | ..... | n+a-1 | n+a   | ..... | n-o+h |
-            |observation is used | YES   | YES   | YES   | YES   | NO    | NO    | NO    | NO    | NO    |
-            |action is generated | YES   | YES   | YES   | YES   | YES   | YES   | YES   | YES   | YES   |
-            |action is used      | NO    | NO    | NO    | YES   | YES   | YES   | NO    | NO    | NO    |
-            ----------------------------------------------------------------------------------------------
-        Note that this means we require: `n_action_steps <= horizon - n_obs_steps + 1`. Also, note that
-        "horizon" may not the best name to describe what the variable actually means, because this period is
-        actually measured from the first observation which (if `n_obs_steps` > 1) happened in the past.
         """
         # NOTE: for offline evaluation, we have action in the batch, so we need to pop it out
         if ACTION in batch:
@@ -166,24 +157,22 @@ class FlowMatchingPolicy(PreTrainedPolicy):
         action = self._queues[ACTION].popleft()
         return action
 
-    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
+    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
         """Run the batch through the model and compute the loss for training or validation."""
         batch = self.normalize_inputs(batch)
-        batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
         if self.config.image_features:
+            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-        if self.config.env_state_feature:
-            # Note: we don't need to change OBS_ENV_STATE key because DiffusionModel expects it as is
-            pass
         batch = self.normalize_targets(batch)
         loss = self.flow_matching.compute_loss(batch)
-        return loss, {}
+        # no output_dict so returning None
+        return loss, None
 
 
-class FlowMatchingModel(nn.Module):
-    """Flow matching model using the same UNet as DiffusionModel but with flow matching scheduler."""
+class FlowMatchingTransformerModel(nn.Module):
+    """Flow matching model using transformer architecture."""
 
-    def __init__(self, config: FlowMatchingConfig):
+    def __init__(self, config: FlowMatchingTransformerConfig):
         super().__init__()
         self.config = config
 
@@ -201,13 +190,12 @@ class FlowMatchingModel(nn.Module):
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
 
-        # SAME UNet as diffusion - just reuse the architecture
-        self.unet = FlowMatchingConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
+        self.transformer = FlowMatchingTransformer1d(config, global_cond_dim=global_cond_dim)
 
         # Flow matching scheduler (replaces diffusion scheduler)
         self.flow_scheduler = self._make_flow_scheduler(config)
 
-    def _make_flow_scheduler(self, config: FlowMatchingConfig):
+    def _make_flow_scheduler(self, config: FlowMatchingTransformerConfig):
         """Create flow matching scheduler."""
         if config.flow_matching_type == "CondOT":
             return CondOTProbPath()
@@ -216,21 +204,28 @@ class FlowMatchingModel(nn.Module):
 
     # ========= inference  ============
     def conditional_sample(
-        self, batch_size: int, global_cond: Tensor | None = None, generator: torch.Generator | None = None
+        self,
+        batch_size: int,
+        global_cond: Tensor | None = None,
+        generator: torch.Generator | None = None,
     ) -> Tensor:
         device = get_device_from_parameters(self)
         dtype = get_dtype_from_parameters(self)
 
         # Sample prior (x_0 - noise)
         x_0 = torch.randn(
-            size=(batch_size, self.config.horizon, self.config.action_feature.shape[0]),
+            size=(
+                batch_size,
+                self.config.horizon,
+                self.config.action_feature.shape[0],
+            ),
             dtype=dtype,
             device=device,
             generator=generator,
         )
 
         # Create wrapped model for ODESolver
-        wrapped_model = FlowMatchingUNetWrapper(self.unet, self.config)
+        wrapped_model = FlowMatchingTransformerWrapper(self.transformer, self.config)
 
         # Create time grid from 0 to 1
         time_grid = torch.linspace(0, 1, self.config.num_integration_steps + 1, device=device)
@@ -244,10 +239,7 @@ class FlowMatchingModel(nn.Module):
         return solution
 
     def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
-        """Encode image features and concatenate them all together along with the state vector.
-
-        SAME as diffusion policy global conditioning.
-        """
+        """Encode image features and concatenate them all together along with the state vector."""
         batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
         global_cond_feats = [batch[OBS_STATE]]
         # Extract image features.
@@ -261,7 +253,10 @@ class FlowMatchingModel(nn.Module):
                 # Separate batch and sequence dims back out. The camera index dim gets absorbed into the
                 # feature dim (effectively concatenating the camera features).
                 img_features = einops.rearrange(
-                    img_features_list, "(n b s) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
+                    img_features_list,
+                    "(n b s) ... -> b s (n ...)",
+                    b=batch_size,
+                    s=n_obs_steps,
                 )
             else:
                 # Combine batch, sequence, and "which camera" dims before passing to shared encoder.
@@ -270,7 +265,12 @@ class FlowMatchingModel(nn.Module):
                 )
                 # Separate batch dim and sequence dim back out. The camera index dim gets absorbed into the
                 # feature dim (effectively concatenating the camera features).
-                img_features = einops.rearrange(img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps)
+                img_features = einops.rearrange(
+                    img_features,
+                    "(b s n) ... -> b s (n ...)",
+                    b=batch_size,
+                    s=n_obs_steps,
+                )
             global_cond_feats.append(img_features)
 
         if self.config.env_state_feature:
@@ -345,7 +345,7 @@ class FlowMatchingModel(nn.Module):
         dx_t = path_sample.dx_t
 
         # Predict velocity field
-        pred_velocity = self.unet(x_t, t, global_cond=global_cond)
+        pred_velocity = self.transformer(x_t, t, global_cond=global_cond)
 
         # Flow matching loss (MSE between predicted and true velocity)
         loss = F.mse_loss(pred_velocity, dx_t, reduction="none")
@@ -362,10 +362,296 @@ class FlowMatchingModel(nn.Module):
         return loss.mean()
 
 
-# ============= UNet Components (COPIED from diffusion with minimal changes) =============
+class FlowMatchingSinusoidalPosEmb(nn.Module):
+    """1D sinusoidal positional embeddings as in Attention is All You Need."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x: Tensor) -> Tensor:
+        device = x.device
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = x.unsqueeze(-1) * emb.unsqueeze(0)
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
 
 
-class SpatialSoftmax(nn.Module):
+class FlowMatchingConditioningEncoder(nn.Module):
+    """Flow matching conditioning encoder for timestep and observation conditioning.
+    
+    Adapted from diffusion conditioning encoder for flow matching by using continuous time [0,1]
+    instead of discrete diffusion timesteps.
+    """
+    
+    def __init__(self, config: FlowMatchingTransformerConfig, global_cond_dim: int):
+        super().__init__()
+        self.config = config
+        
+        # Time embedding for flow matching time in [0,1]
+        self.time_emb = FlowMatchingSinusoidalPosEmb(config.attention_embed_dim)
+        
+        # Observation embedding
+        self.cond_obs_emb = nn.Linear(global_cond_dim, config.attention_embed_dim)
+        
+        # Conditioning positional embedding
+        # T_cond = 1 (time) + n_obs_steps (observations)
+        T_cond = 1 + config.n_obs_steps
+        self.cond_pos_emb = nn.Parameter(torch.zeros(1, T_cond, config.attention_embed_dim))
+        
+        # Dropout
+        self.drop = nn.Dropout(config.embedding_dropout)
+        
+        # Encoder
+        if config.n_conditioning_layers > 0:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=config.attention_embed_dim,
+                nhead=config.n_attention_heads,
+                dim_feedforward=4 * config.attention_embed_dim,
+                dropout=config.attention_dropout,
+                activation='gelu',
+                batch_first=True,
+                norm_first=True
+            )
+            self.encoder = nn.TransformerEncoder(
+                encoder_layer=encoder_layer,
+                num_layers=config.n_conditioning_layers
+            )
+        else:
+            # Fallback when n_cond_layers == 0
+            self.encoder = nn.Sequential(
+                nn.Linear(config.attention_embed_dim, 4 * config.attention_embed_dim),
+                nn.Mish(),
+                nn.Linear(4 * config.attention_embed_dim, config.attention_embed_dim)
+            )
+    
+    def forward(self, timestep: Tensor, global_cond: Tensor) -> Tensor:
+        """
+        Args:
+            timestep: (B,) tensor of flow matching timesteps in [0,1]
+            global_cond: (B, global_cond_dim) global conditioning from observations
+        Returns:
+            (B, T_cond, embed_dim) conditioning memory
+        """
+        # Use raw [0,1] timesteps directly - no scaling needed
+        # Flow matching theory should work with continuous [0,1] time
+        
+        # Time embedding: (B,) -> (B, 1, embed_dim)
+        time_emb = self.time_emb(timestep).unsqueeze(1)
+        
+        # Global conditioning: (B, global_cond_dim) -> (B, n_obs_steps, embed_dim)
+        cond_obs_emb = self.cond_obs_emb(global_cond)
+        cond_obs_emb = cond_obs_emb.unsqueeze(1).expand(-1, self.config.n_obs_steps, -1)
+        
+        # Concatenate: [time_emb, cond_obs_emb] -> (B, 1 + n_obs_steps, embed_dim)
+        cond_embeddings = torch.cat([time_emb, cond_obs_emb], dim=1)
+        
+        # Add positional embeddings
+        tc = cond_embeddings.shape[1]
+        position_embeddings = self.cond_pos_emb[:, :tc, :]
+        x = self.drop(cond_embeddings + position_embeddings)
+        
+        # Apply encoder
+        memory = self.encoder(x)
+        return memory
+
+
+class FlowMatchingActionDecoder(nn.Module):
+    """Flow matching action decoder with cross-attention to conditioning memory.
+    
+    Copied from diffusion action decoder for flow matching use.
+    """
+    
+    def __init__(self, config: FlowMatchingTransformerConfig, action_dim: int):
+        super().__init__()
+        self.config = config
+        
+        # Input embedding
+        self.input_emb = nn.Linear(action_dim, config.attention_embed_dim)
+        
+        # Positional embedding
+        self.pos_emb = nn.Parameter(torch.zeros(1, config.horizon, config.attention_embed_dim))
+        
+        # Dropout
+        self.drop = nn.Dropout(config.embedding_dropout)
+        
+        # Decoder
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=config.attention_embed_dim,
+            nhead=config.n_attention_heads,
+            dim_feedforward=4 * config.attention_embed_dim,
+            dropout=config.attention_dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True
+        )
+        self.decoder = nn.TransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=config.n_decoder_layers
+        )
+        
+        # Output layers
+        self.ln_f = nn.LayerNorm(config.attention_embed_dim)
+        self.head = nn.Linear(config.attention_embed_dim, action_dim)
+    
+    def forward(self, sample: Tensor, memory: Tensor, tgt_mask: Tensor = None, memory_mask: Tensor = None) -> Tensor:
+        """
+        Args:
+            sample: (B, T, action_dim) noisy action sequence
+            memory: (B, T_cond, embed_dim) conditioning memory from encoder
+            tgt_mask: Causal mask for action sequence
+            memory_mask: Cross-attention mask between actions and conditioning
+        Returns:
+            (B, T, action_dim) velocity field predictions
+        """
+        token_embeddings = self.input_emb(sample)
+        t = token_embeddings.shape[1]
+        position_embeddings = self.pos_emb[:, :t, :]
+        x = self.drop(token_embeddings + position_embeddings)
+        
+        # Apply decoder with cross-attention
+        x = self.decoder(
+            tgt=x,
+            memory=memory,
+            tgt_mask=tgt_mask,
+            memory_mask=memory_mask
+        )
+        
+        # Output projection
+        x = self.ln_f(x)
+        x = self.head(x)
+        return x
+
+
+def _create_flow_matching_attention_masks(config: FlowMatchingTransformerConfig, device: torch.device):
+    """Create attention masks for flow matching transformer."""
+    T = config.horizon
+    T_cond = 1 + config.n_obs_steps
+    
+    # Causal mask for decoder
+    mask = (torch.triu(torch.ones(T, T, device=device)) == 1).transpose(0, 1)
+    mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+    
+    # Memory mask for cross-attention
+    t, s = torch.meshgrid(torch.arange(T, device=device), torch.arange(T_cond, device=device), indexing='ij')
+    memory_mask = t >= (s - 1)  # add one dimension since time is first token
+    memory_mask = memory_mask.float().masked_fill(memory_mask == 0, float('-inf')).masked_fill(memory_mask == 1, float(0.0))
+    
+    return mask, memory_mask
+
+
+class FlowMatchingTransformer1d(nn.Module):
+    """Flow matching transformer using encoder-decoder architecture.
+    
+    Uses separate encoder for conditioning (timestep + observations) and decoder for action generation
+    with cross-attention, adapted from the diffusion transformer implementation.
+    """
+
+    def __init__(self, config: FlowMatchingTransformerConfig, global_cond_dim: int):
+        super().__init__()
+        self.config = config
+        action_dim = config.action_feature.shape[0]
+        
+        # Flow matching conditioning encoder
+        self.conditioning_encoder = FlowMatchingConditioningEncoder(config, global_cond_dim)
+        
+        # Flow matching action decoder
+        self.action_decoder = FlowMatchingActionDecoder(config, action_dim)
+        
+        # Attention masks
+        if config.use_causal_attention:
+            # Note: masks will be created on the correct device in forward pass
+            self.register_buffer("_mask_template", torch.zeros(1))  # placeholder
+            self.register_buffer("_memory_mask_template", torch.zeros(1))  # placeholder
+        else:
+            self.mask = None
+            self.memory_mask = None
+        
+        # Initialize weights
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        """Initialize weights following transformer conventions."""
+        ignore_types = (
+            nn.Dropout, 
+            FlowMatchingSinusoidalPosEmb, 
+            nn.TransformerEncoderLayer, 
+            nn.TransformerDecoderLayer,
+            nn.TransformerEncoder,
+            nn.TransformerDecoder,
+            nn.ModuleList,
+            nn.Mish,
+            nn.Sequential
+        )
+        
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.MultiheadAttention):
+            weight_names = ['in_proj_weight', 'q_proj_weight', 'k_proj_weight', 'v_proj_weight']
+            for name in weight_names:
+                weight = getattr(module, name)
+                if weight is not None:
+                    torch.nn.init.normal_(weight, mean=0.0, std=0.02)
+            
+            bias_names = ['in_proj_bias', 'bias_k', 'bias_v']
+            for name in bias_names:
+                bias = getattr(module, name)
+                if bias is not None:
+                    torch.nn.init.zeros_(bias)
+        elif isinstance(module, nn.LayerNorm):
+            torch.nn.init.zeros_(module.bias)
+            torch.nn.init.ones_(module.weight)
+        elif isinstance(module, FlowMatchingConditioningEncoder):
+            torch.nn.init.normal_(module.cond_pos_emb, mean=0.0, std=0.02)
+        elif isinstance(module, FlowMatchingActionDecoder):
+            torch.nn.init.normal_(module.pos_emb, mean=0.0, std=0.02)
+        elif isinstance(module, ignore_types):
+            pass
+        # Don't raise error for unaccounted modules to maintain compatibility
+
+    def forward(
+        self,
+        x: Tensor,
+        timestep: Tensor | int,
+        global_cond: Tensor | None = None,
+    ) -> Tensor:
+        """Flow matching transformer forward pass.
+        
+        Args:
+            x: (B, T, action_dim) tensor for noisy action sequences
+            timestep: (B,) tensor of flow matching timesteps in [0,1]
+            global_cond: (B, global_cond_dim) global conditioning from observations
+        Returns:
+            (B, T, action_dim) velocity field predictions
+        """
+        device = x.device
+        
+        # Create attention masks on correct device
+        if self.config.use_causal_attention:
+            mask, memory_mask = _create_flow_matching_attention_masks(self.config, device)
+        else:
+            mask = None
+            memory_mask = None
+        
+        # Encode conditioning (timestep + observations) -> memory
+        memory = self.conditioning_encoder(timestep, global_cond)
+        
+        # Decode actions with cross-attention to memory
+        predictions = self.action_decoder(
+            sample=x,
+            memory=memory,
+            tgt_mask=mask,
+            memory_mask=memory_mask
+        )
+        
+        return predictions
+
+
+class FlowMatchingSpatialSoftmax(nn.Module):
     """
     Spatial Soft Argmax operation described in "Deep Spatial Autoencoders for Visuomotor Learning" by Finn et al.
     (https://huggingface.co/papers/1509.06113). A minimal port of the robomimic implementation.
@@ -408,7 +694,10 @@ class SpatialSoftmax(nn.Module):
 
         # we could use torch.linspace directly but that seems to behave slightly differently than numpy
         # and causes a small degradation in pc_success of pre-trained models.
-        pos_x, pos_y = np.meshgrid(np.linspace(-1.0, 1.0, self._in_w), np.linspace(-1.0, 1.0, self._in_h))
+        pos_x, pos_y = np.meshgrid(
+            np.linspace(-1.0, 1.0, self._in_w),
+            np.linspace(-1.0, 1.0, self._in_h),
+        )
         pos_x = torch.from_numpy(pos_x.reshape(self._in_h * self._in_w, 1)).float()
         pos_y = torch.from_numpy(pos_y.reshape(self._in_h * self._in_w, 1)).float()
         # register as buffer so it's moved to the correct device.
@@ -440,10 +729,10 @@ class FlowMatchingRgbEncoder(nn.Module):
     """Encodes an RGB image into a 1D feature vector.
 
     Includes the ability to normalize and crop the image first.
-    SAME as DiffusionRgbEncoder.
+    Copied from DiffusionRgbEncoder for flow matching use.
     """
 
-    def __init__(self, config: FlowMatchingConfig):
+    def __init__(self, config: FlowMatchingTransformerConfig):
         super().__init__()
         # Set up optional preprocessing.
         if config.crop_shape is not None:
@@ -465,7 +754,7 @@ class FlowMatchingRgbEncoder(nn.Module):
         if config.use_group_norm:
             if config.pretrained_backbone_weights:
                 raise ValueError("You can't replace BatchNorm in a pretrained model without ruining the weights!")
-            self.backbone = _replace_submodules(
+            self.backbone = _replace_flow_matching_submodules(
                 root_module=self.backbone,
                 predicate=lambda x: isinstance(x, nn.BatchNorm2d),
                 func=lambda x: nn.GroupNorm(num_groups=x.num_features // 16, num_channels=x.num_features),
@@ -483,7 +772,7 @@ class FlowMatchingRgbEncoder(nn.Module):
         dummy_shape = (1, images_shape[0], *dummy_shape_h_w)
         feature_map_shape = get_output_shape(self.backbone, dummy_shape)[1:]
 
-        self.pool = SpatialSoftmax(feature_map_shape, num_kp=config.spatial_softmax_num_keypoints)
+        self.pool = FlowMatchingSpatialSoftmax(feature_map_shape, num_kp=config.spatial_softmax_num_keypoints)
         self.feature_dim = config.spatial_softmax_num_keypoints * 2
         self.out = nn.Linear(config.spatial_softmax_num_keypoints * 2, self.feature_dim)
         self.relu = nn.ReLU()
@@ -509,8 +798,10 @@ class FlowMatchingRgbEncoder(nn.Module):
         return x
 
 
-def _replace_submodules(
-    root_module: nn.Module, predicate: Callable[[nn.Module], bool], func: Callable[[nn.Module], nn.Module]
+def _replace_flow_matching_submodules(
+    root_module: nn.Module,
+    predicate: Callable[[nn.Module], bool],
+    func: Callable[[nn.Module], nn.Module],
 ) -> nn.Module:
     """
     Args:
@@ -540,231 +831,3 @@ def _replace_submodules(
     # verify that all BN are replaced
     assert not any(predicate(m) for _, m in root_module.named_modules(remove_duplicate=True))
     return root_module
-
-
-class FlowMatchingSinusoidalPosEmb(nn.Module):
-    """1D sinusoidal positional embeddings as in Attention is All You Need.
-
-    SAME as DiffusionSinusoidalPosEmb.
-    """
-
-    def __init__(self, dim: int):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x: Tensor) -> Tensor:
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x.unsqueeze(-1) * emb.unsqueeze(0)
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
-
-
-class FlowMatchingConv1dBlock(nn.Module):
-    """Conv1d --> GroupNorm --> Mish
-
-    SAME as DiffusionConv1dBlock.
-    """
-
-    def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8):
-        super().__init__()
-
-        self.block = nn.Sequential(
-            nn.Conv1d(inp_channels, out_channels, kernel_size, padding=kernel_size // 2),
-            nn.GroupNorm(n_groups, out_channels),
-            nn.Mish(),
-        )
-
-    def forward(self, x):
-        return self.block(x)
-
-
-class FlowMatchingConditionalUnet1d(nn.Module):
-    """A 1D convolutional UNet with FiLM modulation for conditioning.
-
-    SAME as DiffusionConditionalUnet1d but adapted for flow matching.
-    Note: this removes local conditioning as compared to the original diffusion policy code.
-    """
-
-    def __init__(self, config: FlowMatchingConfig, global_cond_dim: int):
-        super().__init__()
-
-        self.config = config
-
-        # Encoder for the flow time (reuses diffusion timestep embedding architecture).
-        self.time_encoder = nn.Sequential(
-            FlowMatchingSinusoidalPosEmb(config.fm_time_embed_dim),
-            nn.Linear(config.fm_time_embed_dim, config.fm_time_embed_dim * 4),
-            nn.Mish(),
-            nn.Linear(config.fm_time_embed_dim * 4, config.fm_time_embed_dim),
-        )
-
-        # The FiLM conditioning dimension.
-        cond_dim = config.fm_time_embed_dim + global_cond_dim
-
-        # In channels / out channels for each downsampling block in the Unet's encoder. For the decoder, we
-        # just reverse these.
-        in_out = [(config.action_feature.shape[0], config.down_dims[0])] + list(
-            zip(config.down_dims[:-1], config.down_dims[1:], strict=True)
-        )
-
-        # Unet encoder.
-        common_res_block_kwargs = {
-            "cond_dim": cond_dim,
-            "kernel_size": config.kernel_size,
-            "n_groups": config.n_groups,
-            "use_film_scale_modulation": config.use_film_scale_modulation,
-        }
-        self.down_modules = nn.ModuleList([])
-        for ind, (dim_in, dim_out) in enumerate(in_out):
-            is_last = ind >= (len(in_out) - 1)
-            self.down_modules.append(
-                nn.ModuleList(
-                    [
-                        FlowMatchingConditionalResidualBlock1d(dim_in, dim_out, **common_res_block_kwargs),
-                        FlowMatchingConditionalResidualBlock1d(dim_out, dim_out, **common_res_block_kwargs),
-                        # Downsample as long as it is not the last block.
-                        nn.Conv1d(dim_out, dim_out, 3, 2, 1) if not is_last else nn.Identity(),
-                    ]
-                )
-            )
-
-        # Processing in the middle of the auto-encoder.
-        self.mid_modules = nn.ModuleList(
-            [
-                FlowMatchingConditionalResidualBlock1d(
-                    config.down_dims[-1], config.down_dims[-1], **common_res_block_kwargs
-                ),
-                FlowMatchingConditionalResidualBlock1d(
-                    config.down_dims[-1], config.down_dims[-1], **common_res_block_kwargs
-                ),
-            ]
-        )
-
-        # Unet decoder.
-        self.up_modules = nn.ModuleList([])
-        for ind, (dim_out, dim_in) in enumerate(reversed(in_out[1:])):
-            is_last = ind >= (len(in_out) - 1)
-            self.up_modules.append(
-                nn.ModuleList(
-                    [
-                        # dim_in * 2, because it takes the encoder's skip connection as well
-                        FlowMatchingConditionalResidualBlock1d(dim_in * 2, dim_out, **common_res_block_kwargs),
-                        FlowMatchingConditionalResidualBlock1d(dim_out, dim_out, **common_res_block_kwargs),
-                        # Upsample as long as it is not the last block.
-                        nn.ConvTranspose1d(dim_out, dim_out, 4, 2, 1) if not is_last else nn.Identity(),
-                    ]
-                )
-            )
-
-        self.final_conv = nn.Sequential(
-            FlowMatchingConv1dBlock(config.down_dims[0], config.down_dims[0], kernel_size=config.kernel_size),
-            nn.Conv1d(config.down_dims[0], config.action_feature.shape[0], 1),
-        )
-
-    def forward(self, x: Tensor, timestep: Tensor | int, global_cond=None) -> Tensor:
-        """
-        Args:
-            x: (B, T, input_dim) tensor for input to the Unet.
-            timestep: (B,) tensor of time values in [0,1] range for flow matching.
-            global_cond: (B, global_cond_dim)
-            output: (B, T, input_dim)
-        Returns:
-            (B, T, input_dim) flow matching velocity field prediction.
-        """
-        # For 1D convolutions we'll need feature dimension first.
-        x = einops.rearrange(x, "b t d -> b d t")
-
-        # Use raw [0,1] timesteps directly - no scaling needed
-        # Flow matching theory works with continuous [0,1] time
-        timesteps_embed = self.time_encoder(timestep)
-
-        # If there is a global conditioning feature, concatenate it to the timestep embedding.
-        if global_cond is not None:
-            global_feature = torch.cat([timesteps_embed, global_cond], axis=-1)
-        else:
-            global_feature = timesteps_embed
-
-        # Run encoder, keeping track of skip features to pass to the decoder.
-        encoder_skip_features: list[Tensor] = []
-        for resnet, resnet2, downsample in self.down_modules:
-            x = resnet(x, global_feature)
-            x = resnet2(x, global_feature)
-            encoder_skip_features.append(x)
-            x = downsample(x)
-
-        for mid_module in self.mid_modules:
-            x = mid_module(x, global_feature)
-
-        # Run decoder, using the skip features from the encoder.
-        for resnet, resnet2, upsample in self.up_modules:
-            x = torch.cat((x, encoder_skip_features.pop()), dim=1)
-            x = resnet(x, global_feature)
-            x = resnet2(x, global_feature)
-            x = upsample(x)
-
-        x = self.final_conv(x)
-
-        x = einops.rearrange(x, "b d t -> b t d")
-        return x
-
-
-class FlowMatchingConditionalResidualBlock1d(nn.Module):
-    """ResNet style 1D convolutional block with FiLM modulation for conditioning.
-
-    SAME as DiffusionConditionalResidualBlock1d.
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        cond_dim: int,
-        kernel_size: int = 3,
-        n_groups: int = 8,
-        # Set to True to do scale modulation with FiLM as well as bias modulation (defaults to False meaning
-        # FiLM just modulates bias).
-        use_film_scale_modulation: bool = False,
-    ):
-        super().__init__()
-
-        self.use_film_scale_modulation = use_film_scale_modulation
-        self.out_channels = out_channels
-
-        self.conv1 = FlowMatchingConv1dBlock(in_channels, out_channels, kernel_size, n_groups=n_groups)
-
-        # FiLM modulation (https://huggingface.co/papers/1709.07871) outputs per-channel bias and (maybe) scale.
-        cond_channels = out_channels * 2 if use_film_scale_modulation else out_channels
-        self.cond_encoder = nn.Sequential(nn.Mish(), nn.Linear(cond_dim, cond_channels))
-
-        self.conv2 = FlowMatchingConv1dBlock(out_channels, out_channels, kernel_size, n_groups=n_groups)
-
-        # A final convolution for dimension matching the residual (if needed).
-        self.residual_conv = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
-
-    def forward(self, x: Tensor, cond: Tensor) -> Tensor:
-        """
-        Args:
-            x: (B, in_channels, T)
-            cond: (B, cond_dim)
-        Returns:
-            (B, out_channels, T)
-        """
-        out = self.conv1(x)
-
-        # Get condition embedding. Unsqueeze for broadcasting to `out`, resulting in (B, out_channels, 1).
-        cond_embed = self.cond_encoder(cond).unsqueeze(-1)
-        if self.use_film_scale_modulation:
-            # Treat the embedding as a list of scales and biases.
-            scale = cond_embed[:, : self.out_channels]
-            bias = cond_embed[:, self.out_channels :]
-            out = scale * out + bias
-        else:
-            # Treat the embedding as biases.
-            out = out + cond_embed
-
-        out = self.conv2(out)
-        out = out + self.residual_conv(x)
-        return out

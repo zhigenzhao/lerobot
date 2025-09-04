@@ -14,6 +14,9 @@
 
 from .act.configuration_act import ACTConfig as ACTConfig
 from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
+from .diffusion_transformer.configuration_diffusion_transformer import DiffusionTransformerConfig as DiffusionTransformerConfig
+from .flow_matching.configuration_flow_matching import FlowMatchingConfig as FlowMatchingConfig
+from .flow_matching_transformer.configuration_flow_matching_transformer import FlowMatchingTransformerConfig as FlowMatchingTransformerConfig
 from .pi0.configuration_pi0 import PI0Config as PI0Config
 from .smolvla.configuration_smolvla import SmolVLAConfig as SmolVLAConfig
 from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig
