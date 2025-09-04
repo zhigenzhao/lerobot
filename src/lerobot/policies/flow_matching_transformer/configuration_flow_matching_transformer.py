@@ -39,12 +39,18 @@ class FlowMatchingTransformerConfig(DiffusionTransformerConfig):
         num_integration_steps: Number of integration steps for ODE solver during inference.
         fm_time_embed_dim: Embedding dimension for flow matching time encoding. This replaces
             diffusion_step_embed_dim.
+        fm_min_period: Minimum period for flow matching positional embeddings.
+        fm_max_period: Maximum period for flow matching positional embeddings.
     """
 
     # Flow matching specific parameters (replacing diffusion parameters)
     flow_matching_type: str = "CondOT"
     num_integration_steps: int = 50
     fm_time_embed_dim: int = 128
+    
+    # Flow matching positional embedding parameters
+    fm_min_period: float = 4e-3
+    fm_max_period: float = 4.0
 
     def __post_init__(self):
         # Call parent post_init but skip diffusion-specific validations

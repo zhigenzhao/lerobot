@@ -363,20 +363,40 @@ class FlowMatchingTransformerModel(nn.Module):
 
 
 class FlowMatchingSinusoidalPosEmb(nn.Module):
-    """1D sinusoidal positional embeddings as in Attention is All You Need."""
+    """Flow matching positional embeddings with parameterized periods.
+    
+    Based on the flow matching positional encoding approach that works naturally
+    with continuous [0,1] time values using configurable min/max periods.
+    """
 
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, min_period: float = 4e-3, max_period: float = 4.0):
         super().__init__()
+        if dim % 2 != 0:
+            raise ValueError(f"embedding_dim ({dim}) must be divisible by 2")
+        
         self.dim = dim
+        self.min_period = min_period
+        self.max_period = max_period
+        
+        # Precompute fraction for geometric progression of periods
+        self.register_buffer("fraction", torch.linspace(0.0, 1.0, dim // 2))
 
-    def forward(self, x: Tensor) -> Tensor:
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x.unsqueeze(-1) * emb.unsqueeze(0)
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
+    def forward(self, pos: Tensor) -> Tensor:
+        """
+        Args:
+            pos: (B,) tensor of positions (designed for [0,1] flow matching time)
+        Returns:
+            (B, dim) positional embeddings
+        """
+        # Create geometric progression of periods from min to max
+        period = self.min_period * (self.max_period / self.min_period) ** self.fraction
+        
+        # Compute sinusoidal inputs: pos * (2π / period)
+        # Shape: (B, 1) * (1, dim//2) -> (B, dim//2)
+        sinusoid_input = pos.unsqueeze(-1) * (1.0 / period * 2 * math.pi)
+        
+        # Concatenate sin and cos components
+        return torch.cat([torch.sin(sinusoid_input), torch.cos(sinusoid_input)], dim=-1)
 
 
 class FlowMatchingConditioningEncoder(nn.Module):
@@ -391,7 +411,11 @@ class FlowMatchingConditioningEncoder(nn.Module):
         self.config = config
         
         # Time embedding for flow matching time in [0,1]
-        self.time_emb = FlowMatchingSinusoidalPosEmb(config.attention_embed_dim)
+        self.time_emb = FlowMatchingSinusoidalPosEmb(
+            config.attention_embed_dim, 
+            min_period=config.fm_min_period,
+            max_period=config.fm_max_period
+        )
         
         # Observation embedding
         self.cond_obs_emb = nn.Linear(global_cond_dim, config.attention_embed_dim)

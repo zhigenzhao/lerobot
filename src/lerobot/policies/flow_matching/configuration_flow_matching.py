@@ -139,6 +139,10 @@ class FlowMatchingConfig(PreTrainedConfig):
     sigma_min: float = 1e-4                   # Minimum noise level
     clip_sample: bool = True                  # Clip samples during inference
     clip_sample_range: float = 1.0            # Clipping range
+    
+    # Flow matching positional embedding parameters
+    fm_min_period: float = 4e-3               # Minimum period for positional embeddings
+    fm_max_period: float = 4.0                # Maximum period for positional embeddings
 
     # Loss computation (SAME as diffusion)
     do_mask_loss_for_padding: bool = False
