@@ -565,9 +565,14 @@ class FlowMatchingSinusoidalPosEmb(nn.Module):
         """
         Args:
             pos: (B,) tensor of positions (designed for [0,1] flow matching time)
+                 Can also handle 0D scalar tensors from ODE solver
         Returns:
             (B, dim) positional embeddings
         """
+        # Handle 0D scalar input from ODE solver by adding batch dimension
+        if pos.dim() == 0:
+            pos = pos.unsqueeze(0)  # Convert () -> (1,) 
+        
         # Create geometric progression of periods from min to max
         period = self.min_period * (self.max_period / self.min_period) ** self.fraction
         
