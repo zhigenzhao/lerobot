@@ -690,7 +690,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
         for vid_key, query_ts in query_timestamps.items():
             video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
             frames = decode_video_frames(video_path, query_ts, self.tolerance_s, self.video_backend)
-            item[vid_key] = frames.squeeze(0)
+            # Don't squeeze - maintain temporal dimension to match _query_hf_dataset behavior
+            # This ensures consistency: (n_timestamps, C, H, W) same as torch.stack() for images
+            item[vid_key] = frames
 
         return item
 
