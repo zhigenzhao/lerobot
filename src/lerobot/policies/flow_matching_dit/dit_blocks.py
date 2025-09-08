@@ -63,13 +63,107 @@ class FlowMatchingSinusoidalPosEmb(nn.Module):
         return emb
 
 
-# Import all other components from diffusion_dit that remain unchanged
-from lerobot.policies.diffusion_dit.dit_blocks import (
-    AdaLayerNorm,
-    AdaLayerNormZero,
-    FeedForward,
-    PositionalEncoding,
-)
+class AdaLayerNorm(nn.Module):
+    """Adaptive Layer Normalization for timestep conditioning.
+    
+    Based on the diffusers implementation: applies scale and shift modulation
+    to layer normalization based on timestep embeddings.
+    """
+    
+    def __init__(self, hidden_size: int, timestep_embed_dim: int, norm_elementwise_affine: bool = True, norm_eps: float = 1e-5):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.silu = nn.SiLU()
+        self.linear = nn.Linear(timestep_embed_dim, 2 * hidden_size, bias=True)
+        self.norm = nn.LayerNorm(hidden_size, elementwise_affine=norm_elementwise_affine, eps=norm_eps)
+    
+    def forward(self, x: torch.Tensor, timestep_emb: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (batch, seq_len, hidden_size)
+            timestep_emb: Timestep embedding of shape (batch, embedding_dim)
+            
+        Returns:
+            Modulated tensor with adaptive normalization applied
+        """
+        emb = self.linear(self.silu(timestep_emb))
+        scale, shift = emb.chunk(2, dim=1)
+        
+        x = self.norm(x) * (1 + scale[:, None, :]) + shift[:, None, :]
+        return x
+
+
+class AdaLayerNormZero(nn.Module):
+    """AdaLayerNorm with zero-initialization and gating.
+    
+    Based on the diffusers implementation: generates 6 parameters for
+    gated residual connections in attention and MLP layers.
+    """
+    
+    def __init__(self, hidden_size: int, timestep_embed_dim: int, norm_elementwise_affine: bool = True, norm_eps: float = 1e-5):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.silu = nn.SiLU()
+        self.linear = nn.Linear(timestep_embed_dim, 6 * hidden_size, bias=True)
+        self.norm = nn.LayerNorm(hidden_size, elementwise_affine=norm_elementwise_affine, eps=norm_eps)
+        
+        # Zero initialization for better training stability
+        nn.init.zeros_(self.linear.weight)
+        nn.init.zeros_(self.linear.bias)
+    
+    def forward(self, x: torch.Tensor, timestep_emb: torch.Tensor) -> tuple[torch.Tensor, tuple]:
+        """
+        Args:
+            x: Input tensor of shape (batch, seq_len, hidden_size)
+            timestep_emb: Timestep embedding of shape (batch, embedding_dim)
+            
+        Returns:
+            Tuple of (normalized_x, (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp))
+        """
+        emb = self.linear(self.silu(timestep_emb))
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = emb.chunk(6, dim=1)
+        
+        x = self.norm(x) * (1 + scale_msa[:, None, :]) + shift_msa[:, None, :]
+        
+        return x, (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)
+
+
+class FeedForward(nn.Module):
+    """Feed-forward network with GELU activation."""
+    
+    def __init__(self, hidden_size: int, intermediate_size: Optional[int] = None, dropout: float = 0.1):
+        super().__init__()
+        intermediate_size = intermediate_size or 4 * hidden_size
+        
+        self.net = nn.Sequential(
+            nn.Linear(hidden_size, intermediate_size),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(intermediate_size, hidden_size),
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class PositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding for sequence modeling."""
+    
+    def __init__(self, hidden_size: int, max_len: int = 1000):
+        super().__init__()
+        
+        pe = torch.zeros(max_len, hidden_size)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, hidden_size, 2).float() * 
+                           (-math.log(10000.0) / hidden_size))
+        
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        
+        self.register_buffer('pe', pe.unsqueeze(0))
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.pe[:, :x.size(1)]
 
 
 class DiTBlock(nn.Module):
