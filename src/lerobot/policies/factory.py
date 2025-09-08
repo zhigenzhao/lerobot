@@ -28,6 +28,7 @@ from lerobot.policies.act.configuration_act import ACTConfig
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion_transformer.configuration_diffusion_transformer import DiffusionTransformerConfig
 from lerobot.policies.diffusion_dit.configuration_diffusion_dit import DiffusionDiTConfig
+from lerobot.policies.flow_matching_dit.configuration_flow_matching_dit import FlowMatchingDiTConfig
 from lerobot.policies.flow_matching.configuration_flow_matching import FlowMatchingConfig
 from lerobot.policies.flow_matching_transformer.configuration_flow_matching_transformer import FlowMatchingTransformerConfig
 from lerobot.policies.pi0.configuration_pi0 import PI0Config
@@ -66,6 +67,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.policies.diffusion_dit.modeling_diffusion_dit import DiffusionDiTPolicy
 
         return DiffusionDiTPolicy
+    elif name == "flow_matching_dit":
+        from lerobot.policies.flow_matching_dit.modeling_flow_matching_dit import FlowMatchingDiTPolicy
+
+        return FlowMatchingDiTPolicy
     elif name == "act":
         from lerobot.policies.act.modeling_act import ACTPolicy
 
@@ -111,6 +116,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return FlowMatchingTransformerConfig(**kwargs)
     elif policy_type == "diffusion_dit":
         return DiffusionDiTConfig(**kwargs)
+    elif policy_type == "flow_matching_dit":
+        return FlowMatchingDiTConfig(**kwargs)
     elif policy_type == "act":
         return ACTConfig(**kwargs)
     elif policy_type == "vqbet":
