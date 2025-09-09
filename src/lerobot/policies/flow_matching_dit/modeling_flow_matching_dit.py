@@ -428,7 +428,8 @@ class FlowMatchingDiTModel(nn.Module):
         solution = ode_solver.sample(
             time_grid=time_grid,
             x_init=x_0, 
-            method=self.config.ode_solver_method
+            method=self.config.ode_solver_method,
+            step_size=None
         )
         
         # Return final sample at t=1
