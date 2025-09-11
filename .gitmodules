@@ -1,0 +1,4 @@
+[submodule "submodules/R5"]
+	path = submodules/R5
+	url = https://github.com/zhigenzhao/R5.git
+	branch = dev/python_pkg
