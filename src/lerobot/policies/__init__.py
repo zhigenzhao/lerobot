@@ -17,6 +17,7 @@ from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfi
 from .diffusion_transformer.configuration_diffusion_transformer import DiffusionTransformerConfig as DiffusionTransformerConfig
 from .flow_matching.configuration_flow_matching import FlowMatchingConfig as FlowMatchingConfig
 from .flow_matching_transformer.configuration_flow_matching_transformer import FlowMatchingTransformerConfig as FlowMatchingTransformerConfig
+from .hybrid_diffusion.configuration_hybrid_diffusion import HybridDiffusionConfig as HybridDiffusionConfig
 from .pi0.configuration_pi0 import PI0Config as PI0Config
 from .smolvla.configuration_smolvla import SmolVLAConfig as SmolVLAConfig
 from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig

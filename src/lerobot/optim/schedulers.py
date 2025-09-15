@@ -76,6 +76,74 @@ class VQBeTSchedulerConfig(LRSchedulerConfig):
         return LambdaLR(optimizer, lr_lambda, -1)
 
 
+@LRSchedulerConfig.register_subclass("hybrid_diffusion")
+@dataclass
+class HybridDiffusionSchedulerConfig(LRSchedulerConfig):
+    """Scheduler for hybrid diffusion policy two-stage training.
+
+    Stage 1 (0 to num_vae_training_steps):
+    - VAE parameters: normal learning rate
+    - Diffusion parameters: zero learning rate (frozen)
+
+    Stage 2 (after num_vae_training_steps):
+    - VAE parameters: zero learning rate (frozen)
+    - Diffusion parameters: warmup + cosine annealing
+    """
+    num_warmup_steps: int
+    num_vae_training_steps: int
+    num_cycles: float = 0.5
+
+    def build(self, optimizer: Optimizer, num_training_steps: int) -> LambdaLR:
+        def lr_lambda(current_step):
+            # This assumes parameter groups are ordered as: [vae_params, diffusion_params]
+            param_group_idx = getattr(lr_lambda, '_param_group_idx', 0)
+
+            if param_group_idx == 0:  # VAE parameters
+                if current_step < self.num_vae_training_steps:
+                    return 1.0  # Normal VAE learning rate
+                else:
+                    return 0.0  # Frozen after VAE training
+            else:  # Diffusion parameters (param_group_idx >= 1)
+                if current_step < self.num_vae_training_steps:
+                    return 0.0  # Frozen during VAE training
+                else:
+                    # Warmup + cosine annealing for diffusion training
+                    adjusted_step = current_step - self.num_vae_training_steps
+                    if adjusted_step < self.num_warmup_steps:
+                        return float(adjusted_step) / float(max(1, self.num_warmup_steps))
+                    progress = float(adjusted_step - self.num_warmup_steps) / float(
+                        max(1, num_training_steps - self.num_vae_training_steps - self.num_warmup_steps)
+                    )
+                    return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(self.num_cycles) * 2.0 * progress)))
+
+        # Create individual lambda functions for each parameter group
+        def make_lr_lambda(group_idx):
+            def group_lr_lambda(current_step):
+                if group_idx == 0:  # VAE parameters
+                    if current_step < self.num_vae_training_steps:
+                        return 1.0  # Normal VAE learning rate
+                    else:
+                        return 0.0  # Frozen after VAE training
+                else:  # Diffusion parameters
+                    if current_step < self.num_vae_training_steps:
+                        return 0.0  # Frozen during VAE training
+                    else:
+                        # Warmup + cosine annealing for diffusion training
+                        adjusted_step = current_step - self.num_vae_training_steps
+                        if adjusted_step < self.num_warmup_steps:
+                            return float(adjusted_step) / float(max(1, self.num_warmup_steps))
+                        progress = float(adjusted_step - self.num_warmup_steps) / float(
+                            max(1, num_training_steps - self.num_vae_training_steps - self.num_warmup_steps)
+                        )
+                        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(self.num_cycles) * 2.0 * progress)))
+            return group_lr_lambda
+
+        # Create lambda functions for each parameter group
+        lr_lambdas = [make_lr_lambda(i) for i in range(len(optimizer.param_groups))]
+
+        return LambdaLR(optimizer, lr_lambdas, -1)
+
+
 @LRSchedulerConfig.register_subclass("cosine_decay_with_warmup")
 @dataclass
 class CosineDecayWithWarmupSchedulerConfig(LRSchedulerConfig):
