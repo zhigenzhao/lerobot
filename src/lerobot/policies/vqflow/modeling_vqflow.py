@@ -16,13 +16,20 @@
 
 """VQFlow Policy: Vector Quantized Actions + Discrete Flow Matching with DiT backbone."""
 
+from collections import deque
+from typing import Optional
+
 import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from collections import deque
+from flow_matching.loss import MixturePathGeneralizedKL
+
+# Flow matching library imports
+from flow_matching.path import MixtureDiscreteProbPath
+from flow_matching.path.scheduler import PolynomialConvexScheduler
+from flow_matching.solver import MixtureDiscreteEulerSolver
 from torch import Tensor
-from typing import Optional
 
 from lerobot.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 from lerobot.policies.normalize import Normalize, Unnormalize
@@ -32,26 +39,14 @@ from lerobot.policies.utils import (
     get_dtype_from_parameters,
     populate_queues,
 )
-
 from lerobot.policies.vqflow.configuration_vqflow import VQFlowConfig
-from lerobot.policies.vqflow.vqflow_utils import (
-    VQFlowVAE, 
-    flatten_indices, 
-    unflatten_indices,
-    DiscreteModelWrapper
-)
 from lerobot.policies.vqflow.discrete_dit_blocks import (
     DiscreteFlowDiTBlock,
     DiscreteFlowDiTEmbeddings,
     DiscreteFlowTimestepEmbedding,
-    VQFlowRgbEncoder
+    VQFlowRgbEncoder,
 )
-
-# Flow matching library imports
-from flow_matching.path import MixtureDiscreteProbPath
-from flow_matching.path.scheduler import PolynomialConvexScheduler
-from flow_matching.loss import MixturePathGeneralizedKL
-from flow_matching.solver import MixtureDiscreteEulerSolver
+from lerobot.policies.vqflow.vqflow_utils import DiscreteModelWrapper, VQFlowVAE, flatten_indices, unflatten_indices
 
 
 class VQFlowPolicy(PreTrainedPolicy):
@@ -240,7 +235,7 @@ class VQFlowModel(nn.Module):
         self._build_observation_encoder(config)
         
         # Discrete flow matching DiT
-        self.dit = DiscreteFlowDiT(config)
+        self.dit = DiscreteFlowDiT(config, self.obs_encoding_dim)
         
         # Discrete flow matching components
         scheduler = PolynomialConvexScheduler(n=config.scheduler_power)
@@ -251,22 +246,23 @@ class VQFlowModel(nn.Module):
         """Build observation encoders for different modalities."""
         # Robot state is always present
         obs_dim = config.robot_state_feature.shape[0]
-        
+
         # Add image encoders if present
         if config.image_features:
             num_images = len(config.image_features)
             if config.use_separate_rgb_encoder_per_camera:
                 encoders = [VQFlowRgbEncoder(config) for _ in range(num_images)]
                 self.rgb_encoders = nn.ModuleList(encoders)
-                obs_dim += encoders[0].feature_dim * num_images
+                # FIX: Use cross_attention_dim since RGB encoders output cross_attention_dim features
+                obs_dim += config.cross_attention_dim * num_images
             else:
                 self.rgb_encoder = VQFlowRgbEncoder(config)
                 obs_dim += config.cross_attention_dim * num_images
-        
+
         # Add environment state if present
         if config.env_state_feature:
             obs_dim += config.env_state_feature.shape[0]
-        
+
         # Final observation encoding dimension
         self.obs_encoding_dim = obs_dim * config.n_obs_steps
     
@@ -329,18 +325,21 @@ class VQFlowModel(nn.Module):
     def _sample_discrete_flow(self, batch_size: int, obs_encoding: Tensor) -> Tensor:
         """Sample discrete tokens using flow matching ODE solver."""
         device = get_device_from_parameters(self)
-        
+
+        # Calculate expected sequence length from VQVAE encoding
+        seq_len = self.config.horizon - self.config.action_chunk_size + 1  # 64 - 8 + 1 = 57
+
         # Initialize with source distribution
         if self.config.source_distribution == "uniform":
             x_init = torch.randint(
-                0, self.config.vocab_size, 
-                (batch_size, self.config.horizon), 
+                0, self.config.vocab_size,
+                (batch_size, seq_len),
                 device=device
             )
         else:  # mask
             x_init = torch.full(
-                (batch_size, self.config.horizon), 
-                self.config.mask_token_id, 
+                (batch_size, seq_len),
+                self.config.mask_token_id,
                 device=device
             )
         
@@ -386,36 +385,33 @@ class VQFlowModel(nn.Module):
             hierarchical_indices = self.vqvae.encode_to_indices(target_actions)
             
             # Flatten hierarchical indices to single vocabulary
-            B, num_chunks, num_layers = hierarchical_indices.shape
+            num_chunks, num_layers = hierarchical_indices.shape[1:]
             x_1 = []
             for i in range(num_chunks):
                 chunk_indices = hierarchical_indices[:, i]  # (B, num_layers)
                 flat_indices = flatten_indices(chunk_indices, self.config.vqvae_n_embed)
                 x_1.append(flat_indices)
-            x_1 = torch.stack(x_1, dim=1)  # (B, num_chunks)
-            
-            # For simplicity, use only the first chunk for now
-            # TODO: Handle full horizon properly
-            x_1 = x_1[:, 0]  # (B,)
-        
-        # Sample source distribution
-        batch_size = target_actions.shape[0]
+            x_1 = torch.stack(x_1, dim=1)  # (B, num_chunks) - KEEP ALL CHUNKS
+
+        # Sample source distribution for all chunks
+        batch_size, seq_len = x_1.shape
         if self.config.source_distribution == "uniform":
-            x_0 = torch.randint(0, self.config.vocab_size, (batch_size,), device=x_1.device)
+            x_0 = torch.randint(0, self.config.vocab_size, (batch_size, seq_len), device=x_1.device)
         else:  # mask
-            x_0 = torch.full((batch_size,), self.config.mask_token_id, device=x_1.device)
-        
-        # Sample time and discrete path
+            x_0 = torch.full((batch_size, seq_len), self.config.mask_token_id, device=x_1.device)
+
+        # Sample time
         t = torch.rand(batch_size, device=x_1.device) * (1 - self.config.flow_epsilon)
+
+        # Discrete path sampling
         path_sample = self.discrete_path.sample(t=t, x_0=x_0, x_1=x_1)
-        x_t = path_sample.x_t
-        
+        x_t = path_sample.x_t  # (B, seq_len)
+
         # Encode observations for conditioning
         obs_encoding = self._encode_observations(batch)
-        
-        # Predict token probabilities with DiT
-        logits = self.dit(x_t.unsqueeze(1), t, obs_encoding)  # Add sequence dimension
-        logits = logits.squeeze(1)  # Remove sequence dimension
+
+        # DiT prediction for full sequence
+        logits = self.dit(x_t, t, obs_encoding)  # (B, seq_len, vocab_size)
         
         # Compute generalized KL divergence loss
         loss = self.discrete_loss_fn(logits=logits, x_1=x_1, x_t=x_t, t=t)
@@ -425,10 +421,11 @@ class VQFlowModel(nn.Module):
 
 class DiscreteFlowDiT(nn.Module):
     """Discrete Flow DiT model for token sequence generation."""
-    
-    def __init__(self, config: VQFlowConfig):
+
+    def __init__(self, config: VQFlowConfig, obs_encoding_dim: int):
         super().__init__()
         self.config = config
+        self.obs_encoding_dim = obs_encoding_dim
         
         # Token and position embeddings
         self.embeddings = DiscreteFlowDiTEmbeddings(
@@ -451,7 +448,10 @@ class DiscreteFlowDiT(nn.Module):
             nn.SiLU(),
             nn.Linear(config.fm_time_embed_dim * 4, config.fm_time_embed_dim)
         )
-        
+
+        # Observation projection for cross-attention
+        self.obs_projection = nn.Linear(obs_encoding_dim, config.cross_attention_dim)
+
         # DiT transformer blocks
         self.transformer_blocks = nn.ModuleList([
             DiscreteFlowDiTBlock(
@@ -498,6 +498,10 @@ class DiscreteFlowDiT(nn.Module):
         Returns:
             (B, seq_len, vocab_size) logits over vocabulary
         """
+        # Ensure input_ids is always 2D: (B, seq_len)
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(1)  # (B,) → (B, 1)
+
         # Token embeddings
         hidden_states = self.embeddings(input_ids)  # (B, seq_len, hidden_size)
         
@@ -508,9 +512,8 @@ class DiscreteFlowDiT(nn.Module):
         # Prepare observation encoding for cross-attention
         encoder_hidden_states = None
         if obs_encoding is not None:
-            # Project to cross-attention dimension and add sequence dimension
-            obs_proj = nn.Linear(obs_encoding.shape[-1], self.config.cross_attention_dim).to(obs_encoding.device)
-            encoder_hidden_states = obs_proj(obs_encoding).unsqueeze(1)  # (B, 1, cross_attention_dim)
+            # Use initialized projection layer
+            encoder_hidden_states = self.obs_projection(obs_encoding).unsqueeze(1)  # (B, 1, cross_attention_dim)
         
         # Pass through transformer blocks
         for block in self.transformer_blocks:
@@ -523,5 +526,5 @@ class DiscreteFlowDiT(nn.Module):
         # Final layer norm and output projection
         hidden_states = self.final_layer_norm(hidden_states)
         logits = self.output_projection(hidden_states)  # (B, seq_len, vocab_size)
-        
+
         return logits

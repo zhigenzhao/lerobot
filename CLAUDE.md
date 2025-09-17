@@ -63,10 +63,56 @@ Each policy implements:
 ### Development Patterns
 
 #### Adding New Policies
-1. Create policy directory under `src/lerobot/policies/`
-2. Implement configuration and modeling classes
-3. Update `available_policies` in `lerobot/__init__.py`
-4. Add tests in `tests/policies/`
+Policies in LeRobot are registered through a multi-step process:
+
+**1. Policy Structure Requirements:**
+- Create policy directory under `src/lerobot/policies/<policy_name>/`
+- Implement `configuration_<policy_name>.py` with config class inheriting from `PreTrainedConfig`
+- Implement `modeling_<policy_name>.py` with policy class inheriting from `PreTrainedPolicy`
+- Set required `name` class attribute matching the policy directory name
+- Set `config_class` attribute pointing to the configuration class
+
+**2. Registration Steps:**
+1. **Manual Registration in `lerobot/__init__.py`:**
+   - Add policy name to `available_policies` list (line 171)
+   - Update `available_policies_per_env` dict with supported environments (lines 195-201)
+
+2. **Test Registration in `tests/test_available.py`:**
+   - Import the policy class (lines 22-26)
+   - Add to `policy_classes` list in `test_available_policies()` (line 49)
+
+**3. Policy Implementation Pattern:**
+```python
+# modeling_<policy_name>.py
+class <PolicyName>Policy(PreTrainedPolicy):
+    config_class = <PolicyName>Config
+    name = "<policy_name>"  # Must match directory name exactly
+```
+
+**4. Implementation Guidelines:**
+- **Standalone Implementation**: Each policy should be completely self-contained
+- **No Cross-Policy Imports**: Do not import network components from other policies to share them
+- **Code Duplication Over Dependencies**: If you need similar network components (e.g., transformers, encoders), copy the code into your policy directory rather than creating shared imports
+- This ensures policies remain modular and can be modified independently without breaking other policies
+
+**5. Current Available Policies:**
+
+*Original LeRobot policies:*
+- `act`: Action Chunking Transformer
+- `diffusion`: Diffusion Policy
+- `tdmpc`: Temporal Difference Model Predictive Control
+- `vqbet`: Vector Quantized Behavior Transformer
+- `pi0`: PI-Zero Policy
+- `pi0fast`: PI-Zero Fast Policy
+- `smolvla`: Small Vision-Language-Action Policy
+- `sac`: Soft Actor-Critic Policy
+
+*Policies developed by us:*
+- `diffusion_transformer`: Diffusion Transformer Policy  
+- `diffusion_dit`: Diffusion DiT Policy
+- `flow_matching`: Flow Matching Policy
+- `flow_matching_dit`: Flow Matching DiT Policy
+- `flow_matching_transformer`: Flow Matching Transformer Policy
 
 #### Adding New Environments
 1. Update `available_tasks_per_env` and `available_datasets_per_env` in `lerobot/__init__.py`

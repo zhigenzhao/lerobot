@@ -22,3 +22,4 @@ from .smolvla.configuration_smolvla import SmolVLAConfig as SmolVLAConfig
 from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig
 from .vqbet.configuration_vqbet import VQBeTConfig as VQBeTConfig
 from .vqflow.configuration_vqflow import VQFlowConfig as VQFlowConfig
+from .vq_flow_transformer.configuration_vq_flow_transformer import VQFlowTransformerConfig as VQFlowTransformerConfig

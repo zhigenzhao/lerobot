@@ -17,12 +17,13 @@
 """Utility classes and functions for VQFlow policy implementation."""
 
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from flow_matching.utils import ModelWrapper
 from torch import Tensor
 
-from flow_matching.utils import ModelWrapper
 from lerobot.policies.vqflow.configuration_vqflow import VQFlowConfig
 
 
