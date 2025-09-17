@@ -195,26 +195,19 @@ class VQFlowPolicy(PreTrainedPolicy):
     def _compute_vqvae_loss(self, batch: dict[str, Tensor]) -> Tensor:
         """Compute VQVAE loss for Phase 1 training."""
         target_actions = batch[ACTION]  # (B, horizon, action_dim)
-        
-        # Convert to action chunks for VQVAE training
-        B, horizon, action_dim = target_actions.shape
-        chunk_size = self.config.action_chunk_size
-        
-        # Use sliding window to create chunks
-        num_chunks = horizon - chunk_size + 1
-        total_loss = 0.0
-        
-        for i in range(num_chunks):
-            chunk = target_actions[:, i:i + chunk_size]  # (B, chunk_size, action_dim)
-            
-            # VQVAE forward pass
-            actions_recon, indices, vq_loss, recon_loss = self.vqflow.vqvae(chunk)
-            
-            # Total loss: reconstruction + VQ + commitment
-            chunk_loss = recon_loss + vq_loss
-            total_loss += chunk_loss
-        
-        return total_loss / num_chunks
+
+        # Extract action sequences for training (use full horizon)
+        start = self.config.n_obs_steps - 1
+        end = start + self.config.horizon
+        action_sequence = target_actions[:, start:end]  # (B, horizon, action_dim)
+
+        # VQVAE forward pass on full sequence
+        actions_recon, indices, vq_loss, recon_loss = self.vqflow.vqvae(action_sequence)
+
+        # Total loss: reconstruction + VQ + commitment
+        total_loss = recon_loss + vq_loss
+
+        return total_loss
     
     def _compute_discrete_flow_loss(self, batch: dict[str, Tensor]) -> Tensor:
         """Compute discrete flow matching loss for Phase 2 training."""
@@ -326,8 +319,8 @@ class VQFlowModel(nn.Module):
         """Sample discrete tokens using flow matching ODE solver."""
         device = get_device_from_parameters(self)
 
-        # Calculate expected sequence length from VQVAE encoding
-        seq_len = self.config.horizon - self.config.action_chunk_size + 1  # 64 - 8 + 1 = 57
+        # Use dynamically calculated target_tokens
+        seq_len = self.config.vqvae_target_tokens
 
         # Initialize with source distribution
         if self.config.source_distribution == "uniform":
@@ -382,18 +375,24 @@ class VQFlowModel(nn.Module):
         # Encode target actions to discrete tokens
         with torch.no_grad():
             target_actions = batch[ACTION]  # (B, horizon, action_dim)
-            hierarchical_indices = self.vqvae.encode_to_indices(target_actions)
-            
-            # Flatten hierarchical indices to single vocabulary
-            num_chunks, num_layers = hierarchical_indices.shape[1:]
-            x_1 = []
-            for i in range(num_chunks):
-                chunk_indices = hierarchical_indices[:, i]  # (B, num_layers)
-                flat_indices = flatten_indices(chunk_indices, self.config.vqvae_n_embed)
-                x_1.append(flat_indices)
-            x_1 = torch.stack(x_1, dim=1)  # (B, num_chunks) - KEEP ALL CHUNKS
 
-        # Sample source distribution for all chunks
+            # Extract action sequence for encoding (use full horizon)
+            start = self.config.n_obs_steps - 1
+            end = start + self.config.horizon
+            action_sequence = target_actions[:, start:end]  # (B, horizon, action_dim)
+
+            hierarchical_indices = self.vqvae.encode_to_indices(action_sequence)  # (B, target_tokens, num_layers)
+
+            # Flatten hierarchical indices to single vocabulary for each token
+            batch_size, target_tokens, num_layers = hierarchical_indices.shape
+            x_1 = []
+            for i in range(target_tokens):
+                token_indices = hierarchical_indices[:, i]  # (B, num_layers)
+                flat_indices = flatten_indices(token_indices, self.config.vqvae_n_embed)
+                x_1.append(flat_indices)
+            x_1 = torch.stack(x_1, dim=1)  # (B, target_tokens)
+
+        # Sample source distribution for all tokens
         batch_size, seq_len = x_1.shape
         if self.config.source_distribution == "uniform":
             x_0 = torch.randint(0, self.config.vocab_size, (batch_size, seq_len), device=x_1.device)
@@ -431,7 +430,7 @@ class DiscreteFlowDiT(nn.Module):
         self.embeddings = DiscreteFlowDiTEmbeddings(
             vocab_size=config.vocab_size,
             hidden_size=config.hidden_size,
-            max_position_embeddings=config.horizon,
+            max_position_embeddings=config.vqvae_target_tokens,
             dropout=config.attention_dropout
         )
         

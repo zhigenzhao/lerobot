@@ -25,6 +25,7 @@ from flow_matching.utils import ModelWrapper
 from torch import Tensor
 
 from lerobot.policies.vqflow.configuration_vqflow import VQFlowConfig
+from lerobot.policies.vqflow.vqflow_conv_modules import TemporalEncoder, TemporalDecoder
 
 
 class VQFlowMLP(nn.Module):
@@ -202,50 +203,44 @@ class VQFlowVAE(nn.Module):
     def __init__(self, config: VQFlowConfig):
         super().__init__()
         self.config = config
-        
-        # Calculate input/output dimensions
+
+        # Calculate dimensions
         action_dim = config.action_feature.shape[0]
-        input_dim = action_dim * config.action_chunk_size
-        
-        # Encoder: continuous actions -> embedding space
-        self.encoder = VQFlowMLP(
-            in_channels=input_dim,
-            hidden_channels=[
-                config.vqvae_enc_hidden_dim,
-                config.vqvae_enc_hidden_dim, 
-                config.vqvae_embedding_dim
-            ]
+
+        # Encoder: continuous actions -> token embeddings
+        self.encoder = TemporalEncoder(
+            action_dim=action_dim,
+            embedding_dim=config.vqvae_embedding_dim,
+            stage_channels=config.vqvae_encoder_channels,
+            num_groups=config.vqvae_num_groups
         )
-        
+
+        # Calculate number of output tokens dynamically
+        self.num_tokens = config.vqvae_target_tokens
+
         # Vector quantization
         self.vq_layer = ResidualVQ(
             dim=config.vqvae_embedding_dim,
             num_quantizers=config.vqvae_num_layers,
             codebook_size=config.vqvae_n_embed
         )
-        
-        # Decoder: embedding space -> continuous actions
-        self.decoder = VQFlowMLP(
-            in_channels=config.vqvae_embedding_dim,
-            hidden_channels=[
-                config.vqvae_enc_hidden_dim,
-                config.vqvae_enc_hidden_dim,
-                input_dim
-            ]
+
+        # Decoder: token embeddings -> continuous actions
+        self.decoder = TemporalDecoder(
+            embedding_dim=config.vqvae_embedding_dim,
+            action_dim=action_dim,
+            stage_channels=config.vqvae_encoder_channels,
+            num_groups=config.vqvae_num_groups
         )
-        
+
         # Training phase tracking
         self.register_buffer("optimized_steps", torch.tensor(0))
         self.register_buffer("phase1_complete", torch.tensor(False))
     
     def encode(self, actions: Tensor) -> Tensor:
         """Encode actions to continuous embeddings."""
-        # Flatten action chunks: (B, chunk_size, action_dim) -> (B, chunk_size * action_dim)
-        B, chunk_size, action_dim = actions.shape
-        actions_flat = actions.reshape(B, chunk_size * action_dim)
-        
-        # Encode to embedding space
-        z = self.encoder(actions_flat)
+        # actions: (B, action_horizon, action_dim) -> (B, target_tokens, embedding_dim)
+        z = self.encoder(actions)
         return z
     
     def quantize(self, z: Tensor) -> tuple[Tensor, Tensor, Tensor]:
@@ -254,89 +249,81 @@ class VQFlowVAE(nn.Module):
     
     def decode(self, z_q: Tensor) -> Tensor:
         """Decode quantized embeddings back to actions."""
-        # Decode to flattened actions
-        actions_flat = self.decoder(z_q)
-        
-        # Reshape back to action chunks
-        B = z_q.shape[0]
-        actions = actions_flat.reshape(B, self.config.action_chunk_size, -1)
+        # z_q: (B, target_tokens, embedding_dim) -> (B, action_horizon, action_dim)
+        actions = self.decoder(z_q)
         return actions
     
     def encode_to_indices(self, actions: Tensor) -> Tensor:
         """Encode actions directly to discrete indices.
-        
+
         Args:
-            actions: (B, horizon, action_dim) or (B, chunk_size, action_dim)
+            actions: (B, action_horizon, action_dim) full action sequences
         Returns:
-            indices: (B, num_chunks, num_layers) discrete indices
+            indices: (B, target_tokens, num_layers) discrete indices for each token
         """
-        if actions.dim() == 3 and actions.shape[1] > self.config.action_chunk_size:
-            # Handle horizon > chunk_size by using sliding windows
-            horizon = actions.shape[1]
-            num_chunks = horizon - self.config.action_chunk_size + 1
-            all_indices = []
-            
-            for i in range(num_chunks):
-                chunk = actions[:, i:i + self.config.action_chunk_size]
-                z = self.encode(chunk)
-                _, indices, _ = self.quantize(z)
-                all_indices.append(indices)
-            
-            return torch.stack(all_indices, dim=1)  # (B, num_chunks, num_layers)
-        else:
-            # Single chunk
-            z = self.encode(actions)
-            _, indices, _ = self.quantize(z)
-            return indices.unsqueeze(1)  # (B, 1, num_layers)
+        # Encode full sequence to token embeddings
+        z = self.encode(actions)  # (B, target_tokens, embedding_dim)
+
+        # Quantize each token independently
+        B, target_tokens, embedding_dim = z.shape
+        z_flat = z.reshape(B * target_tokens, embedding_dim)
+
+        _, indices_flat, _ = self.quantize(z_flat)  # (B * target_tokens, num_layers)
+        indices = indices_flat.reshape(B, target_tokens, -1)  # (B, target_tokens, num_layers)
+
+        return indices
     
     def decode_from_indices(self, indices: Tensor) -> Tensor:
         """Decode from discrete indices to continuous actions.
-        
+
         Args:
-            indices: (B, num_chunks, num_layers) discrete indices
+            indices: (B, target_tokens, num_layers) discrete indices
         Returns:
-            actions: (B, num_chunks * chunk_size, action_dim) continuous actions
+            actions: (B, action_horizon, action_dim) continuous actions
         """
-        B, num_chunks, num_layers = indices.shape
-        all_actions = []
-        
-        for i in range(num_chunks):
-            chunk_indices = indices[:, i]  # (B, num_layers)
-            
-            # Get codebook vectors and sum across layers
-            vectors = self.vq_layer.get_codebook_vectors(chunk_indices)  # (B, num_layers, dim)
-            z_q = vectors.sum(dim=1)  # (B, dim)
-            
-            # Decode chunk
-            actions = self.decode(z_q)  # (B, chunk_size, action_dim)
-            all_actions.append(actions)
-        
-        # Concatenate chunks along time dimension
-        return torch.cat(all_actions, dim=1)  # (B, num_chunks * chunk_size, action_dim)
+        B, target_tokens, num_layers = indices.shape
+
+        # Reconstruct token embeddings from indices
+        indices_flat = indices.reshape(B * target_tokens, num_layers)
+        vectors = self.vq_layer.get_codebook_vectors(indices_flat)  # (B * target_tokens, num_layers, dim)
+        z_q_flat = vectors.sum(dim=1)  # (B * target_tokens, dim)
+        z_q = z_q_flat.reshape(B, target_tokens, -1)  # (B, target_tokens, embedding_dim)
+
+        # Decode to full action sequence
+        actions = self.decode(z_q)  # (B, action_horizon, action_dim)
+
+        return actions
     
     def forward(self, actions: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Full forward pass for training.
-        
+
         Args:
-            actions: (B, chunk_size, action_dim) action chunks
+            actions: (B, action_horizon, action_dim) full action sequences
         Returns:
             actions_recon: Reconstructed actions
             indices: Quantization indices
             vq_loss: Vector quantization loss
             recon_loss: Reconstruction loss
         """
-        # Encode
-        z = self.encode(actions)
-        
-        # Quantize  
-        z_q, indices, vq_loss = self.quantize(z)
-        
-        # Decode
+        # Encode to token embeddings
+        z = self.encode(actions)  # (B, target_tokens, embedding_dim)
+
+        # Quantize each token independently
+        B, target_tokens, embedding_dim = z.shape
+        z_flat = z.reshape(B * target_tokens, embedding_dim)
+
+        z_q_flat, indices_flat, vq_loss = self.quantize(z_flat)
+
+        # Reshape back
+        z_q = z_q_flat.reshape(B, target_tokens, embedding_dim)
+        indices = indices_flat.reshape(B, target_tokens, -1)
+
+        # Decode to full sequence
         actions_recon = self.decode(z_q)
-        
+
         # Reconstruction loss
         recon_loss = F.l1_loss(actions, actions_recon)
-        
+
         return actions_recon, indices, vq_loss, recon_loss
     
     def freeze(self):
@@ -345,6 +332,8 @@ class VQFlowVAE(nn.Module):
         self.vq_layer.freeze()
         for param in self.parameters():
             param.requires_grad = False
+        # Set to eval mode like VQ-BeT does - critical for GroupNorm and EMA behavior
+        self.eval()
 
 
 def flatten_indices(indices: Tensor, codebook_size: int) -> Tensor:

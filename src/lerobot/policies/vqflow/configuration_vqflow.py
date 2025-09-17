@@ -41,13 +41,12 @@ class VQFlowConfig(PreTrainedConfig):
         n_obs_steps: Number of environment steps worth of observations to pass to the policy.
         horizon: Model action prediction horizon (total sequence length).
         n_action_steps: Number of action steps to run in environment per policy invocation.
-        action_chunk_size: Size of action chunks for VQVAE quantization.
         
         # VQVAE Parameters (Phase 1)
         vqvae_n_embed: Size of each RVQ codebook (number of discrete codes per layer).
         vqvae_embedding_dim: Dimensionality of quantized embeddings.
         vqvae_num_layers: Number of residual quantization layers (hierarchical codes).
-        vqvae_enc_hidden_dim: Hidden layer size in VQVAE encoder/decoder MLPs.
+        vqvae_encoder_channels: Channel dimensions for each encoder stage.
         n_vqvae_training_steps: Number of steps to train VQVAE before freezing.
         vqvae_commitment_beta: Weight for commitment loss in VQVAE training.
         
@@ -91,7 +90,6 @@ class VQFlowConfig(PreTrainedConfig):
     n_obs_steps: int = 2
     horizon: int = 16
     n_action_steps: int = 8
-    action_chunk_size: int = 8  # Size of chunks for VQVAE quantization
     
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
@@ -108,7 +106,8 @@ class VQFlowConfig(PreTrainedConfig):
     vqvae_n_embed: int = 32                    # Larger codebook than VQ-BeT for richer representation
     vqvae_embedding_dim: int = 256             # Embedding dimension for quantized vectors
     vqvae_num_layers: int = 2                  # Number of RVQ layers for hierarchical coding
-    vqvae_enc_hidden_dim: int = 128            # Hidden dimension in encoder/decoder MLPs
+    vqvae_encoder_channels: list[int] = field(default_factory=lambda: [128, 256, 512])  # Channel dims for encoder stages
+    vqvae_num_groups: int = 8                  # Number of groups for GroupNorm in conv layers
     n_vqvae_training_steps: int = 20000        # Steps to train VQVAE before switching to phase 2
     vqvae_commitment_beta: float = 0.25        # Weight for commitment loss
     
@@ -157,10 +156,19 @@ class VQFlowConfig(PreTrainedConfig):
         # Validate VQVAE parameters
         if self.vqvae_n_embed <= 0:
             raise ValueError(f"vqvae_n_embed must be positive, got {self.vqvae_n_embed}")
-        
+
         if self.vqvae_num_layers <= 0:
             raise ValueError(f"vqvae_num_layers must be positive, got {self.vqvae_num_layers}")
-            
+
+        if not self.vqvae_encoder_channels:
+            raise ValueError("vqvae_encoder_channels cannot be empty")
+
+        if any(ch <= 0 for ch in self.vqvae_encoder_channels):
+            raise ValueError(f"All vqvae_encoder_channels must be positive, got {self.vqvae_encoder_channels}")
+
+        if self.vqvae_num_groups <= 0:
+            raise ValueError(f"vqvae_num_groups must be positive, got {self.vqvae_num_groups}")
+
         if self.n_vqvae_training_steps <= 0:
             raise ValueError(f"n_vqvae_training_steps must be positive, got {self.n_vqvae_training_steps}")
         
@@ -194,7 +202,12 @@ class VQFlowConfig(PreTrainedConfig):
         if self.fm_min_period >= self.fm_max_period:
             raise ValueError(f"fm_min_period ({self.fm_min_period}) must be less than fm_max_period ({self.fm_max_period})")
     
-    @property 
+    @property
+    def vqvae_target_tokens(self) -> int:
+        """Calculate number of output tokens from encoder architecture."""
+        return self.horizon // (2 ** len(self.vqvae_encoder_channels))
+
+    @property
     def vocab_size(self) -> int:
         """Calculate vocabulary size for discrete flow matching.
         

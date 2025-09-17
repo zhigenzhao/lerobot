@@ -335,6 +335,8 @@ class VQFlowVAE(nn.Module):
         self.vq_layer.freeze()
         for param in self.parameters():
             param.requires_grad = False
+        # Set to eval mode like VQ-BeT does - critical for LayerNorm and EMA behavior
+        self.eval()
 
 
 def flatten_indices(indices: Tensor, codebook_size: int) -> Tensor:
