@@ -161,11 +161,7 @@ class VQFlowPolicy(PreTrainedPolicy):
         """Forward pass for training."""
         # Update training step
         self.training_step += 1
-        
-        # Check if we should switch phases
-        if self.training_step >= self.config.n_vqvae_training_steps and self.current_phase == 1:
-            self._switch_to_phase2()
-        
+
         # Normalize inputs and targets
         batch = self.normalize_inputs(batch)
         batch = dict(batch)
@@ -174,21 +170,26 @@ class VQFlowPolicy(PreTrainedPolicy):
         if self.config.env_state_feature:
             pass  # Keep OBS_ENV_STATE as is
         batch = self.normalize_targets(batch)
-        
+
         # Compute loss based on current phase
         if self.current_phase == 1:
             loss = self._compute_vqvae_loss(batch)
+            # Increment VQVAE optimized steps only during Phase 1 (like VQ-BeT and VQ-Flow Transformer)
+            self.vqflow.vqvae.optimized_steps += 1
+            # Check if we should switch phases based on VQVAE steps
+            if self.vqflow.vqvae.optimized_steps >= self.config.n_vqvae_training_steps:
+                self._switch_to_phase2()
         else:
             loss = self._compute_discrete_flow_loss(batch)
-        
+
         return loss, {}
     
     def _switch_to_phase2(self):
         """Switch from VQVAE training to discrete flow matching training."""
-        print(f"Switching to Phase 2 at step {self.training_step}")
+        print(f"Phase 1 complete! Switching to Phase 2 after {self.vqflow.vqvae.optimized_steps} VQVAE steps")
         self.current_phase = torch.tensor(2)
         self.vqflow.vqvae.freeze()
-        
+
         # Update learning rate (this would be handled by the training script)
         # The actual optimizer switching happens in the training loop
     
