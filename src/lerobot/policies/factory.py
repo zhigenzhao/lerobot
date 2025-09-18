@@ -40,7 +40,6 @@ from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.policies.vqbet.configuration_vqbet import VQBeTConfig
 from lerobot.policies.vqflow.configuration_vqflow import VQFlowConfig
-from lerobot.policies.vq_flow_transformer.configuration_vq_flow_transformer import VQFlowTransformerConfig
 
 
 def get_policy_class(name: str) -> PreTrainedPolicy:
@@ -85,10 +84,6 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.policies.vqflow.modeling_vqflow import VQFlowPolicy
 
         return VQFlowPolicy
-    elif name == "vq_flow_transformer":
-        from lerobot.policies.vq_flow_transformer.modeling_vq_flow_transformer import VQFlowTransformerPolicy
-
-        return VQFlowTransformerPolicy
     elif name == "pi0":
         from lerobot.policies.pi0.modeling_pi0 import PI0Policy
 
@@ -134,8 +129,6 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return VQBeTConfig(**kwargs)
     elif policy_type == "vqflow":
         return VQFlowConfig(**kwargs)
-    elif policy_type == "vq_flow_transformer":
-        return VQFlowTransformerConfig(**kwargs)
     elif policy_type == "pi0":
         return PI0Config(**kwargs)
     elif policy_type == "pi0fast":
