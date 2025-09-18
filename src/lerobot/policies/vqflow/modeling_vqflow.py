@@ -92,13 +92,36 @@ class VQFlowPolicy(PreTrainedPolicy):
         self.reset()
     
     def get_optim_params(self):
-        """Get parameters for current training phase."""
-        if self.current_phase == 1:
-            # Phase 1: Only VQVAE parameters
-            return self.vqflow.vqvae.parameters()
-        else:
-            # Phase 2: Only DiT parameters (VQVAE is frozen)
-            return [p for p in self.vqflow.parameters() if p.requires_grad]
+        """Get parameter groups for both training phases.
+
+        Returns parameter groups similar to VQBet's approach, allowing the optimizer
+        to handle both phases without recreating the optimizer.
+        """
+        # Phase 1: VQVAE parameters (encoder, decoder, VQ layers)
+        vqvae_params = list(self.vqflow.vqvae.parameters())
+
+        # Phase 2: DiT parameters (all non-VQVAE parameters)
+        dit_params = list(self.vqflow.dit.parameters())
+
+        # Add RGB encoder parameters based on config
+        if self.config.image_features:
+            if self.config.use_separate_rgb_encoder_per_camera:
+                dit_params.extend(list(self.vqflow.rgb_encoders.parameters()))
+            else:
+                dit_params.extend(list(self.vqflow.rgb_encoder.parameters()))
+
+        return [
+            {
+                "params": vqvae_params,
+                "lr": self.config.phase1_lr,
+                "weight_decay": self.config.phase1_weight_decay,
+            },
+            {
+                "params": dit_params,
+                "lr": self.config.phase2_lr,
+                "weight_decay": self.config.phase2_weight_decay,
+            }
+        ]
     
     def reset(self):
         """Clear observation and action queues. Should be called on env.reset()."""
@@ -173,25 +196,39 @@ class VQFlowPolicy(PreTrainedPolicy):
 
         # Compute loss based on current phase
         if self.current_phase == 1:
+            # Phase 1: Train VQVAE only (similar to VQBet's discretization phase)
             loss = self._compute_vqvae_loss(batch)
-            # Increment VQVAE optimized steps only during Phase 1 (like VQ-BeT and VQ-Flow Transformer)
+            # Increment VQVAE optimized steps only during Phase 1
             self.vqflow.vqvae.optimized_steps += 1
             # Check if we should switch phases based on VQVAE steps
             if self.vqflow.vqvae.optimized_steps >= self.config.n_vqvae_training_steps:
                 self._switch_to_phase2()
+            return loss, {}
         else:
+            # Phase 2: Train DiT only (VQVAE is frozen)
             loss = self._compute_discrete_flow_loss(batch)
-
-        return loss, {}
+            return loss, {}
     
     def _switch_to_phase2(self):
         """Switch from VQVAE training to discrete flow matching training."""
         print(f"Phase 1 complete! Switching to Phase 2 after {self.vqflow.vqvae.optimized_steps} VQVAE steps")
         self.current_phase = torch.tensor(2)
+
+        # Freeze VQVAE parameters (similar to VQBet approach)
         self.vqflow.vqvae.freeze()
 
-        # Update learning rate (this would be handled by the training script)
-        # The actual optimizer switching happens in the training loop
+        # Ensure DiT parameters are trainable (in case they were accidentally frozen)
+        for param in self.vqflow.dit.parameters():
+            param.requires_grad = True
+
+        # Ensure RGB encoder parameters are trainable
+        if self.config.image_features:
+            if self.config.use_separate_rgb_encoder_per_camera:
+                for param in self.vqflow.rgb_encoders.parameters():
+                    param.requires_grad = True
+            else:
+                for param in self.vqflow.rgb_encoder.parameters():
+                    param.requires_grad = True
     
     def _compute_vqvae_loss(self, batch: dict[str, Tensor]) -> Tensor:
         """Compute VQVAE loss for Phase 1 training."""
@@ -203,7 +240,7 @@ class VQFlowPolicy(PreTrainedPolicy):
         action_sequence = target_actions[:, start:end]  # (B, horizon, action_dim)
 
         # VQVAE forward pass on full sequence
-        actions_recon, indices, vq_loss, recon_loss = self.vqflow.vqvae(action_sequence)
+        _, _, vq_loss, recon_loss = self.vqflow.vqvae(action_sequence)
 
         # Total loss: reconstruction + VQ + commitment
         total_loss = recon_loss + vq_loss

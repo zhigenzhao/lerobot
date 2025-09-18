@@ -18,8 +18,8 @@ from dataclasses import dataclass, field
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import NormalizationMode
-from lerobot.optim.optimizers import AdamConfig
-from lerobot.optim.schedulers import DiffuserSchedulerConfig
+from lerobot.optim.optimizers import AdamConfig, AdamWConfig
+from lerobot.optim.schedulers import VQFlowSchedulerConfig
 
 
 @PreTrainedConfig.register_subclass("vqflow")
@@ -143,10 +143,11 @@ class VQFlowConfig(PreTrainedConfig):
     do_mask_loss_for_padding: bool = False
     
     # Training presets (two-phase training)
-    phase1_lr: float = 1e-3                    # VQVAE learning rate
-    phase1_weight_decay: float = 1e-4          # VQVAE weight decay
-    phase2_lr: float = 1e-4                    # DiT learning rate  
-    phase2_weight_decay: float = 1e-6          # DiT weight decay
+    optimizer_type: str = "adamw"             # Optimizer type: "adam" or "adamw"
+    phase1_lr: float = 1e-3                   # VQVAE learning rate
+    phase1_weight_decay: float = 1e-4         # VQVAE weight decay
+    phase2_lr: float = 1e-4                   # DiT learning rate
+    phase2_weight_decay: float = 1e-6         # DiT weight decay
     scheduler_name: str = "cosine"
     scheduler_warmup_steps: int = 500
 
@@ -201,6 +202,10 @@ class VQFlowConfig(PreTrainedConfig):
             
         if self.fm_min_period >= self.fm_max_period:
             raise ValueError(f"fm_min_period ({self.fm_min_period}) must be less than fm_max_period ({self.fm_max_period})")
+
+        # Validate optimizer type
+        if self.optimizer_type.lower() not in ["adam", "adamw"]:
+            raise ValueError(f"optimizer_type must be 'adam' or 'adamw', got {self.optimizer_type}")
     
     @property
     def vqvae_target_tokens(self) -> int:
@@ -224,21 +229,29 @@ class VQFlowConfig(PreTrainedConfig):
             raise ValueError("mask_token_id only valid when source_distribution='mask'")
         return self.vocab_size - 1
 
-    def get_optimizer_preset(self) -> AdamConfig:
-        """Get optimizer configuration for current training phase."""
-        # Note: The actual training will switch between phase1 and phase2 parameters
-        # This returns a default that will be overridden during training
-        return AdamConfig(
-            lr=self.phase2_lr,  # Default to phase 2
-            betas=(0.9, 0.999),
-            eps=1e-8,
-            weight_decay=self.phase2_weight_decay,
-        )
+    def get_optimizer_preset(self) -> AdamConfig | AdamWConfig:
+        """Get optimizer configuration based on optimizer_type."""
+        if self.optimizer_type.lower() == "adamw":
+            return AdamWConfig(
+                lr=self.phase2_lr,  # Default to phase 2
+                betas=(0.9, 0.999),
+                eps=1e-8,
+                weight_decay=self.phase2_weight_decay,
+            )
+        elif self.optimizer_type.lower() == "adam":
+            return AdamConfig(
+                lr=self.phase2_lr,  # Default to phase 2
+                betas=(0.9, 0.999),
+                eps=1e-8,
+                weight_decay=self.phase2_weight_decay,
+            )
+        else:
+            raise ValueError(f"Unsupported optimizer type: {self.optimizer_type}. Use 'adam' or 'adamw'")
 
-    def get_scheduler_preset(self) -> DiffuserSchedulerConfig:
-        return DiffuserSchedulerConfig(
-            name=self.scheduler_name,
+    def get_scheduler_preset(self) -> VQFlowSchedulerConfig:
+        return VQFlowSchedulerConfig(
             num_warmup_steps=self.scheduler_warmup_steps,
+            num_vqvae_training_steps=self.n_vqvae_training_steps,
         )
 
     def validate_features(self) -> None:

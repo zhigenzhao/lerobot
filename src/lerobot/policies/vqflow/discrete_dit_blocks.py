@@ -60,8 +60,8 @@ class DiscreteFlowTimestepEmbedding(nn.Module):
         if t.dim() == 0:
             t = t.unsqueeze(0)
         
-        # Apply frequencies: t * freqs * 2π
-        args = t.unsqueeze(-1) * self.freqs.unsqueeze(0) * 2 * math.pi
+        # Apply frequencies: t / period * 2π (correct JAX implementation)
+        args = t.unsqueeze(-1) / self.freqs.unsqueeze(0) * 2 * math.pi
         
         # Sinusoidal encoding
         emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
