@@ -57,7 +57,7 @@ class FlowMatchingSinusoidalPosEmb(nn.Module):
         freqs = torch.exp(torch.linspace(log_min, log_max, half_dim, device=device))
         
         # Apply frequencies to positions
-        args = pos.unsqueeze(-1) * freqs.unsqueeze(0) * 2 * math.pi
+        args = pos.unsqueeze(-1) / freqs.unsqueeze(0) * 2 * math.pi
         emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
         
         return emb
