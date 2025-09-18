@@ -142,6 +142,47 @@ class HybridDiffusionSchedulerConfig(LRSchedulerConfig):
         lr_lambdas = [make_lr_lambda(i) for i in range(len(optimizer.param_groups))]
 
         return LambdaLR(optimizer, lr_lambdas, -1)
+      
+
+@LRSchedulerConfig.register_subclass("vqflow")
+@dataclass
+class VQFlowSchedulerConfig(LRSchedulerConfig):
+    """
+    VQFlow scheduler for 2-stage training with warmup + cosine decay for both phases.
+
+    Phase 1 (0 to num_vqvae_training_steps): Warmup + cosine decay for VQVAE
+    Phase 2 (num_vqvae_training_steps to end): Warmup + cosine decay for DiT
+    """
+    num_warmup_steps: int
+    num_vqvae_training_steps: int
+    num_cycles: float = 0.5
+
+    def build(self, optimizer: Optimizer, num_training_steps: int) -> LambdaLR:
+        def lr_lambda(current_step):
+            if current_step < self.num_vqvae_training_steps:
+                # Phase 1: Warmup + cosine decay for VQVAE training
+                if current_step < self.num_warmup_steps:
+                    # Warmup phase for VQVAE
+                    return float(current_step) / float(max(1, self.num_warmup_steps))
+
+                # Cosine decay phase for VQVAE
+                vqvae_decay_steps = self.num_vqvae_training_steps - self.num_warmup_steps
+                progress = float(current_step - self.num_warmup_steps) / float(max(1, vqvae_decay_steps))
+                return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(self.num_cycles) * 2.0 * progress)))
+            else:
+                # Phase 2: Reset step counter and apply warmup + cosine decay for DiT training
+                adjusted_step = current_step - self.num_vqvae_training_steps
+
+                if adjusted_step < self.num_warmup_steps:
+                    # Warmup phase for DiT training
+                    return float(adjusted_step) / float(max(1, self.num_warmup_steps))
+
+                # Cosine decay phase for DiT training
+                remaining_steps = num_training_steps - self.num_vqvae_training_steps - self.num_warmup_steps
+                progress = float(adjusted_step - self.num_warmup_steps) / float(max(1, remaining_steps))
+                return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(self.num_cycles) * 2.0 * progress)))
+
+        return LambdaLR(optimizer, lr_lambda, -1)
 
 
 @LRSchedulerConfig.register_subclass("cosine_decay_with_warmup")
