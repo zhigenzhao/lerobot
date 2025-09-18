@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
-# Copyright 2024 Columbia Artificial Intelligence, Robotics Lab,
-# and The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 Zhigen Zhao (zhaozhigen@gmail.com)
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

@@ -31,6 +31,7 @@ from lerobot.policies.diffusion_dit.configuration_diffusion_dit import Diffusion
 from lerobot.policies.flow_matching_dit.configuration_flow_matching_dit import FlowMatchingDiTConfig
 from lerobot.policies.flow_matching.configuration_flow_matching import FlowMatchingConfig
 from lerobot.policies.flow_matching_transformer.configuration_flow_matching_transformer import FlowMatchingTransformerConfig
+from lerobot.policies.hybrid_diffusion.configuration_hybrid_diffusion import HybridDiffusionConfig
 from lerobot.policies.pi0.configuration_pi0 import PI0Config
 from lerobot.policies.pi0fast.configuration_pi0fast import PI0FASTConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
@@ -104,6 +105,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 
         return SmolVLAPolicy
+    elif name == "hybrid_diffusion":
+        from lerobot.policies.hybrid_diffusion.modeling_hybrid_diffusion import HybridDiffusionPolicy
+
+        return HybridDiffusionPolicy
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -139,6 +144,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return SmolVLAConfig(**kwargs)
     elif policy_type == "reward_classifier":
         return RewardClassifierConfig(**kwargs)
+    elif policy_type == "hybrid_diffusion":
+        return HybridDiffusionConfig(**kwargs)
     else:
         raise ValueError(f"Policy type '{policy_type}' is not available.")
 

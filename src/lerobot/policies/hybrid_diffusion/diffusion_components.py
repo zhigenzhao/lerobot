@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
 # Copyright 2025 Zhigen Zhao (zhaozhigen@gmail.com)
+# Based on work by Columbia Artificial Intelligence, Robotics Lab,
+# and The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,10 +15,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Flow Matching Policy using the same UNet as Diffusion Policy but with flow matching instead of diffusion."""
+"""Standalone diffusion components copied from the diffusion policy for hybrid diffusion policy."""
 
 import math
-from collections import deque
 from collections.abc import Callable
 
 import einops
@@ -24,179 +25,34 @@ import numpy as np
 import torch
 import torch.nn.functional as F  # noqa: N812
 import torchvision
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from torch import Tensor, nn
 
-from lerobot.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
-from lerobot.policies.flow_matching.configuration_flow_matching import FlowMatchingConfig
-from lerobot.policies.normalize import Normalize, Unnormalize
-from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.constants import OBS_ENV_STATE, OBS_STATE
+from lerobot.policies.hybrid_diffusion.configuration_hybrid_diffusion import HybridDiffusionConfig
 from lerobot.policies.utils import (
     get_device_from_parameters,
     get_dtype_from_parameters,
     get_output_shape,
-    populate_queues,
 )
 
-# Flow matching library imports
-from flow_matching.utils import ModelWrapper
-from flow_matching.path import CondOTProbPath
-from flow_matching.solver import ODESolver
 
-
-class FlowMatchingUNetWrapper(ModelWrapper):
-    """Wrapper for UNet to be compatible with flow_matching library's ModelWrapper interface."""
-
-    def __init__(self, unet, config):
-        super().__init__(unet)
-        self.config = config
-
-    def forward(self, x: torch.Tensor, t: torch.Tensor, **extras):
-        """
-        Forward pass compatible with flow_matching library.
-
-        Args:
-            x: Input tensor (B, horizon, action_dim)
-            t: Time tensor (B,) in [0,1]
-            **extras: Additional arguments like global_cond
-        """
-        global_cond = extras.get("global_cond", None)
-        return self.model(x, t, global_cond=global_cond)
-
-
-class FlowMatchingPolicy(PreTrainedPolicy):
+def _make_noise_scheduler(name: str, **kwargs: dict) -> DDPMScheduler | DDIMScheduler:
     """
-    Flow Matching Policy using the same UNet architecture as Diffusion Policy but with flow matching
-    for generative modeling instead of denoising diffusion.
+    Factory for noise scheduler instances of the requested type. All kwargs are passed
+    to the scheduler.
     """
-
-    config_class = FlowMatchingConfig
-    name = "flow_matching"
-
-    def __init__(
-        self,
-        config: FlowMatchingConfig,
-        dataset_stats: dict[str, dict[str, Tensor]] | None = None,
-    ):
-        """
-        Args:
-            config: Policy configuration class instance or None, in which case the default instantiation of
-                the configuration class is used.
-            dataset_stats: Dataset statistics to be used for normalization. If not passed here, it is expected
-                that they will be passed with a call to `load_state_dict` before the policy is used.
-        """
-        super().__init__(config)
-        config.validate_features()
-        self.config = config
-
-        self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
-        self.normalize_targets = Normalize(config.output_features, config.normalization_mapping, dataset_stats)
-        self.unnormalize_outputs = Unnormalize(config.output_features, config.normalization_mapping, dataset_stats)
-
-        # queues are populated during rollout of the policy, they contain the n latest observations and actions
-        self._queues = None
-
-        self.flow_matching = FlowMatchingModel(config)
-
-        self.reset()
-
-    def get_optim_params(self) -> dict:
-        return self.flow_matching.parameters()
-
-    def reset(self):
-        """Clear observation and action queues. Should be called on `env.reset()`"""
-        self._queues = {
-            "observation.state": deque(maxlen=self.config.n_obs_steps),
-            "action": deque(maxlen=self.config.n_action_steps),
-        }
-        if self.config.image_features:
-            self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
-        if self.config.env_state_feature:
-            self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
-
-    def _get_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
-        """Stateless method to generate actions from prepared observations."""
-        actions = self.flow_matching.generate_actions(batch)
-        # TODO(rcadene): make above methods return output dictionary?
-        actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
-        return actions
-
-    @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
-        """Predict a chunk of actions given environment observations."""
-        # Normalize and prepare batch
-        batch = self.normalize_inputs(batch)
-        if self.config.image_features:
-            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-
-        # Populate queues with current batch
-        self._queues = populate_queues(self._queues, batch)
-
-        # Stack observations from queues
-        prepared_batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
-
-        return self._get_action_chunk(prepared_batch)
-
-    @torch.no_grad()
-    def select_action(self, batch: dict[str, Tensor]) -> Tensor:
-        """Select a single action given environment observations.
-
-        This method handles caching a history of observations and an action trajectory generated by the
-        underlying flow matching model. Here's how it works:
-          - `n_obs_steps` steps worth of observations are cached (for the first steps, the observation is
-            copied `n_obs_steps` times to fill the cache).
-          - The flow matching model generates `horizon` steps worth of actions.
-          - `n_action_steps` worth of actions are actually kept for execution, starting from the current step.
-        Schematically this looks like:
-            ----------------------------------------------------------------------------------------------
-            (legend: o = n_obs_steps, h = horizon, a = n_action_steps)
-            |timestep            | n-o+1 | n-o+2 | ..... | n     | ..... | n+a-1 | n+a   | ..... | n-o+h |
-            |observation is used | YES   | YES   | YES   | YES   | NO    | NO    | NO    | NO    | NO    |
-            |action is generated | YES   | YES   | YES   | YES   | YES   | YES   | YES   | YES   | YES   |
-            |action is used      | NO    | NO    | NO    | YES   | YES   | YES   | NO    | NO    | NO    |
-            ----------------------------------------------------------------------------------------------
-        Note that this means we require: `n_action_steps <= horizon - n_obs_steps + 1`. Also, note that
-        "horizon" may not the best name to describe what the variable actually means, because this period is
-        actually measured from the first observation which (if `n_obs_steps` > 1) happened in the past.
-        """
-        # NOTE: for offline evaluation, we have action in the batch, so we need to pop it out
-        if ACTION in batch:
-            batch.pop(ACTION)
-
-        batch = self.normalize_inputs(batch)
-        if self.config.image_features:
-            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-        # NOTE: It's important that this happens after stacking the images into a single key.
-        self._queues = populate_queues(self._queues, batch)
-
-        if len(self._queues[ACTION]) == 0:
-            # Create prepared batch for action generation
-            prepared_batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
-            actions = self._get_action_chunk(prepared_batch)
-            self._queues[ACTION].extend(actions.transpose(0, 1))
-
-        action = self._queues[ACTION].popleft()
-        return action
-
-    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
-        """Run the batch through the model and compute the loss for training or validation."""
-        batch = self.normalize_inputs(batch)
-        batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-        if self.config.image_features:
-            batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-        if self.config.env_state_feature:
-            # Note: we don't need to change OBS_ENV_STATE key because DiffusionModel expects it as is
-            pass
-        batch = self.normalize_targets(batch)
-        loss = self.flow_matching.compute_loss(batch)
-        return loss, {}
+    if name == "DDPM":
+        return DDPMScheduler(**kwargs)
+    elif name == "DDIM":
+        return DDIMScheduler(**kwargs)
+    else:
+        raise ValueError(f"Unsupported noise scheduler type {name}")
 
 
-class FlowMatchingModel(nn.Module):
-    """Flow matching model using the same UNet as DiffusionModel but with flow matching scheduler."""
-
-    def __init__(self, config: FlowMatchingConfig):
+class HybridDiffusionModel(nn.Module):
+    def __init__(self, config: HybridDiffusionConfig):
         super().__init__()
         self.config = config
 
@@ -205,27 +61,32 @@ class FlowMatchingModel(nn.Module):
         if self.config.image_features:
             num_images = len(self.config.image_features)
             if self.config.use_separate_rgb_encoder_per_camera:
-                encoders = [FlowMatchingRgbEncoder(config) for _ in range(num_images)]
+                encoders = [DiffusionRgbEncoder(config) for _ in range(num_images)]
                 self.rgb_encoder = nn.ModuleList(encoders)
                 global_cond_dim += encoders[0].feature_dim * num_images
             else:
-                self.rgb_encoder = FlowMatchingRgbEncoder(config)
+                self.rgb_encoder = DiffusionRgbEncoder(config)
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
 
-        # SAME UNet as diffusion - just reuse the architecture
-        self.unet = FlowMatchingConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
+        self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
 
-        # Flow matching scheduler (replaces diffusion scheduler)
-        self.flow_scheduler = self._make_flow_scheduler(config)
+        self.noise_scheduler = _make_noise_scheduler(
+            config.noise_scheduler_type,
+            num_train_timesteps=config.num_train_timesteps,
+            beta_start=config.beta_start,
+            beta_end=config.beta_end,
+            beta_schedule=config.beta_schedule,
+            clip_sample=config.clip_sample,
+            clip_sample_range=config.clip_sample_range,
+            prediction_type=config.prediction_type,
+        )
 
-    def _make_flow_scheduler(self, config: FlowMatchingConfig):
-        """Create flow matching scheduler."""
-        if config.flow_matching_type == "CondOT":
-            return CondOTProbPath()
+        if config.num_inference_steps is None:
+            self.num_inference_steps = self.noise_scheduler.config.num_train_timesteps
         else:
-            raise ValueError(f"Unsupported flow matching type: {config.flow_matching_type}")
+            self.num_inference_steps = config.num_inference_steps
 
     # ========= inference  ============
     def conditional_sample(
@@ -234,33 +95,30 @@ class FlowMatchingModel(nn.Module):
         device = get_device_from_parameters(self)
         dtype = get_dtype_from_parameters(self)
 
-        # Sample prior (x_0 - noise)
-        x_0 = torch.randn(
-            size=(batch_size, self.config.horizon, self.config.action_feature.shape[0]),
+        # Sample prior.
+        sample = torch.randn(
+            size=(batch_size, self.config.horizon, self.config.output_features["action"].shape[0]),
             dtype=dtype,
             device=device,
             generator=generator,
         )
 
-        # Create wrapped model for ODESolver
-        wrapped_model = FlowMatchingUNetWrapper(self.unet, self.config)
+        self.noise_scheduler.set_timesteps(self.num_inference_steps)
 
-        # Create time grid from 0 to 1
-        time_grid = torch.linspace(0, 1, self.config.num_integration_steps + 1, device=device)
+        for t in self.noise_scheduler.timesteps:
+            # Predict model output.
+            model_output = self.unet(
+                sample,
+                torch.full(sample.shape[:1], t, dtype=torch.long, device=sample.device),
+                global_cond=global_cond,
+            )
+            # Compute previous image: x_t -> x_t-1
+            sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
 
-        # Create ODESolver and sample
-        solver = ODESolver(velocity_model=wrapped_model)
-        extra_kwargs = {"global_cond": global_cond} if global_cond is not None else {}
-
-        solution = solver.sample(time_grid=time_grid, x_init=x_0, method="midpoint", step_size=None, **extra_kwargs)
-
-        return solution
+        return sample
 
     def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
-        """Encode image features and concatenate them all together along with the state vector.
-
-        SAME as diffusion policy global conditioning.
-        """
+        """Encode image features and concatenate them all together along with the state vector."""
         batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
         global_cond_feats = [batch[OBS_STATE]]
         # Extract image features.
@@ -269,7 +127,10 @@ class FlowMatchingModel(nn.Module):
                 # Combine batch and sequence dims while rearranging to make the camera index dimension first.
                 images_per_camera = einops.rearrange(batch["observation.images"], "b s n ... -> n (b s) ...")
                 img_features_list = torch.cat(
-                    [encoder(images) for encoder, images in zip(self.rgb_encoder, images_per_camera, strict=True)]
+                    [
+                        encoder(images)
+                        for encoder, images in zip(self.rgb_encoder, images_per_camera, strict=True)
+                    ]
                 )
                 # Separate batch and sequence dims back out. The camera index dim gets absorbed into the
                 # feature dim (effectively concatenating the camera features).
@@ -283,7 +144,9 @@ class FlowMatchingModel(nn.Module):
                 )
                 # Separate batch dim and sequence dim back out. The camera index dim gets absorbed into the
                 # feature dim (effectively concatenating the camera features).
-                img_features = einops.rearrange(img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps)
+                img_features = einops.rearrange(
+                    img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
+                )
             global_cond_feats.append(img_features)
 
         if self.config.env_state_feature:
@@ -321,8 +184,6 @@ class FlowMatchingModel(nn.Module):
 
     def compute_loss(self, batch: dict[str, Tensor]) -> Tensor:
         """
-        Flow matching loss computation.
-
         This function expects `batch` to have (at least):
         {
             "observation.state": (B, n_obs_steps, state_dim)
@@ -346,36 +207,45 @@ class FlowMatchingModel(nn.Module):
         # Encode image features and concatenate them all together along with the state vector.
         global_cond = self._prepare_global_conditioning(batch)  # (B, global_cond_dim)
 
-        # Sample target actions, noise, and time
-        target_actions = batch["action"]  # (B, horizon, action_dim)
-        noise = torch.randn_like(target_actions)
-        batch_size = target_actions.shape[0]
-        t = torch.rand(batch_size, device=target_actions.device)
+        # Forward diffusion.
+        trajectory = batch["action"]
+        # Sample noise to add to the trajectory.
+        eps = torch.randn(trajectory.shape, device=trajectory.device)
+        # Sample a random noising timestep for each item in the batch.
+        timesteps = torch.randint(
+            low=0,
+            high=self.noise_scheduler.config.num_train_timesteps,
+            size=(trajectory.shape[0],),
+            device=trajectory.device,
+        ).long()
+        # Add noise to the clean trajectories according to the noise magnitude at each timestep.
+        noisy_trajectory = self.noise_scheduler.add_noise(trajectory, eps, timesteps)
 
-        # Sample from flow matching path
-        path_sample = self.flow_scheduler.sample(t=t, x_0=noise, x_1=target_actions)
-        x_t = path_sample.x_t
-        dx_t = path_sample.dx_t
+        # Run the denoising network (that might denoise the trajectory, or attempt to predict the noise).
+        pred = self.unet(noisy_trajectory, timesteps, global_cond=global_cond)
 
-        # Predict velocity field
-        pred_velocity = self.unet(x_t, t, global_cond=global_cond)
+        # Compute the loss.
+        # The target is either the original trajectory, or the noise.
+        if self.config.prediction_type == "epsilon":
+            target = eps
+        elif self.config.prediction_type == "sample":
+            target = batch["action"]
+        else:
+            raise ValueError(f"Unsupported prediction type {self.config.prediction_type}")
 
-        # Flow matching loss (MSE between predicted and true velocity)
-        loss = F.mse_loss(pred_velocity, dx_t, reduction="none")
+        loss = F.mse_loss(pred, target, reduction="none")
 
-        # Mask loss wherever the action is padded with copies (same as diffusion).
+        # Mask loss wherever the action is padded with copies (edges of the dataset trajectory).
         if self.config.do_mask_loss_for_padding:
             if "action_is_pad" not in batch:
                 raise ValueError(
-                    "You need to provide 'action_is_pad' in the batch when " f"{self.config.do_mask_loss_for_padding=}."
+                    "You need to provide 'action_is_pad' in the batch when "
+                    f"{self.config.do_mask_loss_for_padding=}."
                 )
             in_episode_bound = ~batch["action_is_pad"]
             loss = loss * in_episode_bound.unsqueeze(-1)
 
         return loss.mean()
-
-
-# ============= UNet Components (COPIED from diffusion with minimal changes) =============
 
 
 class SpatialSoftmax(nn.Module):
@@ -449,14 +319,13 @@ class SpatialSoftmax(nn.Module):
         return feature_keypoints
 
 
-class FlowMatchingRgbEncoder(nn.Module):
+class DiffusionRgbEncoder(nn.Module):
     """Encodes an RGB image into a 1D feature vector.
 
     Includes the ability to normalize and crop the image first.
-    SAME as DiffusionRgbEncoder.
     """
 
-    def __init__(self, config: FlowMatchingConfig):
+    def __init__(self, config: HybridDiffusionConfig):
         super().__init__()
         # Set up optional preprocessing.
         if config.crop_shape is not None:
@@ -471,13 +340,17 @@ class FlowMatchingRgbEncoder(nn.Module):
             self.do_crop = False
 
         # Set up backbone.
-        backbone_model = getattr(torchvision.models, config.vision_backbone)(weights=config.pretrained_backbone_weights)
+        backbone_model = getattr(torchvision.models, config.vision_backbone)(
+            weights=config.pretrained_backbone_weights
+        )
         # Note: This assumes that the layer4 feature map is children()[-3]
         # TODO(alexander-soare): Use a safer alternative.
         self.backbone = nn.Sequential(*(list(backbone_model.children())[:-2]))
         if config.use_group_norm:
             if config.pretrained_backbone_weights:
-                raise ValueError("You can't replace BatchNorm in a pretrained model without ruining the weights!")
+                raise ValueError(
+                    "You can't replace BatchNorm in a pretrained model without ruining the weights!"
+                )
             self.backbone = _replace_submodules(
                 root_module=self.backbone,
                 predicate=lambda x: isinstance(x, nn.BatchNorm2d),
@@ -555,53 +428,25 @@ def _replace_submodules(
     return root_module
 
 
-class FlowMatchingSinusoidalPosEmb(nn.Module):
-    """Flow matching positional embeddings with parameterized periods.
-    
-    Based on the flow matching positional encoding approach that works naturally
-    with continuous [0,1] time values using configurable min/max periods.
-    """
+class DiffusionSinusoidalPosEmb(nn.Module):
+    """1D sinusoidal positional embeddings as in Attention is All You Need."""
 
-    def __init__(self, dim: int, min_period: float = 4e-3, max_period: float = 4.0):
+    def __init__(self, dim: int):
         super().__init__()
-        if dim % 2 != 0:
-            raise ValueError(f"embedding_dim ({dim}) must be divisible by 2")
-        
         self.dim = dim
-        self.min_period = min_period
-        self.max_period = max_period
-        
-        # Precompute fraction for geometric progression of periods
-        self.register_buffer("fraction", torch.linspace(0.0, 1.0, dim // 2))
 
-    def forward(self, pos: Tensor) -> Tensor:
-        """
-        Args:
-            pos: (B,) tensor of positions (designed for [0,1] flow matching time)
-                 Can also handle 0D scalar tensors from ODE solver
-        Returns:
-            (B, dim) positional embeddings
-        """
-        # Handle 0D scalar input from ODE solver by adding batch dimension
-        if pos.dim() == 0:
-            pos = pos.unsqueeze(0)  # Convert () -> (1,) 
-        
-        # Create geometric progression of periods from min to max
-        period = self.min_period * (self.max_period / self.min_period) ** self.fraction
-        
-        # Compute sinusoidal inputs: pos * (2π / period)
-        # Shape: (B, 1) * (1, dim//2) -> (B, dim//2)
-        sinusoid_input = pos.unsqueeze(-1) * (1.0 / period * 2 * math.pi)
-        
-        # Concatenate sin and cos components
-        return torch.cat([torch.sin(sinusoid_input), torch.cos(sinusoid_input)], dim=-1)
+    def forward(self, x: Tensor) -> Tensor:
+        device = x.device
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = x.unsqueeze(-1) * emb.unsqueeze(0)
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
 
 
-class FlowMatchingConv1dBlock(nn.Module):
-    """Conv1d --> GroupNorm --> Mish
-
-    SAME as DiffusionConv1dBlock.
-    """
+class DiffusionConv1dBlock(nn.Module):
+    """Conv1d --> GroupNorm --> Mish"""
 
     def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8):
         super().__init__()
@@ -616,36 +461,31 @@ class FlowMatchingConv1dBlock(nn.Module):
         return self.block(x)
 
 
-class FlowMatchingConditionalUnet1d(nn.Module):
+class DiffusionConditionalUnet1d(nn.Module):
     """A 1D convolutional UNet with FiLM modulation for conditioning.
 
-    SAME as DiffusionConditionalUnet1d but adapted for flow matching.
     Note: this removes local conditioning as compared to the original diffusion policy code.
     """
 
-    def __init__(self, config: FlowMatchingConfig, global_cond_dim: int):
+    def __init__(self, config: HybridDiffusionConfig, global_cond_dim: int):
         super().__init__()
 
         self.config = config
 
-        # Encoder for the flow time with configurable periods.
-        self.time_encoder = nn.Sequential(
-            FlowMatchingSinusoidalPosEmb(
-                config.fm_time_embed_dim,
-                min_period=config.fm_min_period,
-                max_period=config.fm_max_period
-            ),
-            nn.Linear(config.fm_time_embed_dim, config.fm_time_embed_dim * 4),
+        # Encoder for the diffusion timestep.
+        self.diffusion_step_encoder = nn.Sequential(
+            DiffusionSinusoidalPosEmb(config.diffusion_step_embed_dim),
+            nn.Linear(config.diffusion_step_embed_dim, config.diffusion_step_embed_dim * 4),
             nn.Mish(),
-            nn.Linear(config.fm_time_embed_dim * 4, config.fm_time_embed_dim),
+            nn.Linear(config.diffusion_step_embed_dim * 4, config.diffusion_step_embed_dim),
         )
 
         # The FiLM conditioning dimension.
-        cond_dim = config.fm_time_embed_dim + global_cond_dim
+        cond_dim = config.diffusion_step_embed_dim + global_cond_dim
 
         # In channels / out channels for each downsampling block in the Unet's encoder. For the decoder, we
         # just reverse these.
-        in_out = [(config.action_feature.shape[0], config.down_dims[0])] + list(
+        in_out = [(config.output_features["action"].shape[0], config.down_dims[0])] + list(
             zip(config.down_dims[:-1], config.down_dims[1:], strict=True)
         )
 
@@ -662,8 +502,8 @@ class FlowMatchingConditionalUnet1d(nn.Module):
             self.down_modules.append(
                 nn.ModuleList(
                     [
-                        FlowMatchingConditionalResidualBlock1d(dim_in, dim_out, **common_res_block_kwargs),
-                        FlowMatchingConditionalResidualBlock1d(dim_out, dim_out, **common_res_block_kwargs),
+                        DiffusionConditionalResidualBlock1d(dim_in, dim_out, **common_res_block_kwargs),
+                        DiffusionConditionalResidualBlock1d(dim_out, dim_out, **common_res_block_kwargs),
                         # Downsample as long as it is not the last block.
                         nn.Conv1d(dim_out, dim_out, 3, 2, 1) if not is_last else nn.Identity(),
                     ]
@@ -673,10 +513,10 @@ class FlowMatchingConditionalUnet1d(nn.Module):
         # Processing in the middle of the auto-encoder.
         self.mid_modules = nn.ModuleList(
             [
-                FlowMatchingConditionalResidualBlock1d(
+                DiffusionConditionalResidualBlock1d(
                     config.down_dims[-1], config.down_dims[-1], **common_res_block_kwargs
                 ),
-                FlowMatchingConditionalResidualBlock1d(
+                DiffusionConditionalResidualBlock1d(
                     config.down_dims[-1], config.down_dims[-1], **common_res_block_kwargs
                 ),
             ]
@@ -690,8 +530,8 @@ class FlowMatchingConditionalUnet1d(nn.Module):
                 nn.ModuleList(
                     [
                         # dim_in * 2, because it takes the encoder's skip connection as well
-                        FlowMatchingConditionalResidualBlock1d(dim_in * 2, dim_out, **common_res_block_kwargs),
-                        FlowMatchingConditionalResidualBlock1d(dim_out, dim_out, **common_res_block_kwargs),
+                        DiffusionConditionalResidualBlock1d(dim_in * 2, dim_out, **common_res_block_kwargs),
+                        DiffusionConditionalResidualBlock1d(dim_out, dim_out, **common_res_block_kwargs),
                         # Upsample as long as it is not the last block.
                         nn.ConvTranspose1d(dim_out, dim_out, 4, 2, 1) if not is_last else nn.Identity(),
                     ]
@@ -699,26 +539,24 @@ class FlowMatchingConditionalUnet1d(nn.Module):
             )
 
         self.final_conv = nn.Sequential(
-            FlowMatchingConv1dBlock(config.down_dims[0], config.down_dims[0], kernel_size=config.kernel_size),
-            nn.Conv1d(config.down_dims[0], config.action_feature.shape[0], 1),
+            DiffusionConv1dBlock(config.down_dims[0], config.down_dims[0], kernel_size=config.kernel_size),
+            nn.Conv1d(config.down_dims[0], config.output_features["action"].shape[0], 1),
         )
 
     def forward(self, x: Tensor, timestep: Tensor | int, global_cond=None) -> Tensor:
         """
         Args:
             x: (B, T, input_dim) tensor for input to the Unet.
-            timestep: (B,) tensor of time values in [0,1] range for flow matching.
+            timestep: (B,) tensor of (timestep_we_are_denoising_from - 1).
             global_cond: (B, global_cond_dim)
             output: (B, T, input_dim)
         Returns:
-            (B, T, input_dim) flow matching velocity field prediction.
+            (B, T, input_dim) diffusion model prediction.
         """
         # For 1D convolutions we'll need feature dimension first.
         x = einops.rearrange(x, "b t d -> b d t")
 
-        # Use raw [0,1] timesteps directly - no scaling needed
-        # Flow matching theory works with continuous [0,1] time
-        timesteps_embed = self.time_encoder(timestep)
+        timesteps_embed = self.diffusion_step_encoder(timestep)
 
         # If there is a global conditioning feature, concatenate it to the timestep embedding.
         if global_cond is not None:
@@ -750,11 +588,8 @@ class FlowMatchingConditionalUnet1d(nn.Module):
         return x
 
 
-class FlowMatchingConditionalResidualBlock1d(nn.Module):
-    """ResNet style 1D convolutional block with FiLM modulation for conditioning.
-
-    SAME as DiffusionConditionalResidualBlock1d.
-    """
+class DiffusionConditionalResidualBlock1d(nn.Module):
+    """ResNet style 1D convolutional block with FiLM modulation for conditioning."""
 
     def __init__(
         self,
@@ -772,16 +607,18 @@ class FlowMatchingConditionalResidualBlock1d(nn.Module):
         self.use_film_scale_modulation = use_film_scale_modulation
         self.out_channels = out_channels
 
-        self.conv1 = FlowMatchingConv1dBlock(in_channels, out_channels, kernel_size, n_groups=n_groups)
+        self.conv1 = DiffusionConv1dBlock(in_channels, out_channels, kernel_size, n_groups=n_groups)
 
         # FiLM modulation (https://huggingface.co/papers/1709.07871) outputs per-channel bias and (maybe) scale.
         cond_channels = out_channels * 2 if use_film_scale_modulation else out_channels
         self.cond_encoder = nn.Sequential(nn.Mish(), nn.Linear(cond_dim, cond_channels))
 
-        self.conv2 = FlowMatchingConv1dBlock(out_channels, out_channels, kernel_size, n_groups=n_groups)
+        self.conv2 = DiffusionConv1dBlock(out_channels, out_channels, kernel_size, n_groups=n_groups)
 
         # A final convolution for dimension matching the residual (if needed).
-        self.residual_conv = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
+        self.residual_conv = (
+            nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
+        )
 
     def forward(self, x: Tensor, cond: Tensor) -> Tensor:
         """
