@@ -46,7 +46,7 @@ from lerobot.policies.vqflow.discrete_dit_blocks import (
     DiscreteFlowTimestepEmbedding,
     VQFlowRgbEncoder,
 )
-from lerobot.policies.vqflow.vqflow_utils import DiscreteModelWrapper, VQFlowVAE, flatten_indices, unflatten_indices
+from lerobot.policies.vqflow.vqflow_utils import DiscreteModelWrapper, VQFlowVAE
 
 
 class VQFlowPolicy(PreTrainedPolicy):
@@ -396,16 +396,9 @@ class VQFlowModel(nn.Module):
     
     def _decode_tokens_to_actions(self, tokens: Tensor) -> Tensor:
         """Decode discrete tokens to continuous actions via VQVAE."""
-        # Convert flat tokens to hierarchical indices
-        indices = unflatten_indices(
-            tokens, 
-            num_layers=self.config.vqvae_num_layers,
-            codebook_size=self.config.vqvae_n_embed
-        )
-        
-        # Decode through VQVAE
-        actions = self.vqvae.decode_from_indices(indices)
-        
+        # For single-layer VQ, tokens are already flat indices - no conversion needed
+        actions = self.vqvae.decode_from_indices(tokens)
+
         return actions
     
     def compute_discrete_flow_loss(self, batch: dict[str, Tensor]) -> Tensor:
@@ -419,16 +412,8 @@ class VQFlowModel(nn.Module):
             end = start + self.config.horizon
             action_sequence = target_actions[:, start:end]  # (B, horizon, action_dim)
 
-            hierarchical_indices = self.vqvae.encode_to_indices(action_sequence)  # (B, target_tokens, num_layers)
-
-            # Flatten hierarchical indices to single vocabulary for each token
-            batch_size, target_tokens, num_layers = hierarchical_indices.shape
-            x_1 = []
-            for i in range(target_tokens):
-                token_indices = hierarchical_indices[:, i]  # (B, num_layers)
-                flat_indices = flatten_indices(token_indices, self.config.vqvae_n_embed)
-                x_1.append(flat_indices)
-            x_1 = torch.stack(x_1, dim=1)  # (B, target_tokens)
+            # Convert continuous actions to discrete tokens via VQVAE
+            x_1 = self.vqvae.encode_to_indices(action_sequence)  # (B, target_tokens) - already flat indices
 
         # Sample source distribution for all tokens
         batch_size, seq_len = x_1.shape

@@ -43,12 +43,14 @@ class VQFlowConfig(PreTrainedConfig):
         n_action_steps: Number of action steps to run in environment per policy invocation.
         
         # VQVAE Parameters (Phase 1)
-        vqvae_n_embed: Size of each RVQ codebook (number of discrete codes per layer).
+        vqvae_n_embed: Size of the VQ codebook (number of discrete codes).
         vqvae_embedding_dim: Dimensionality of quantized embeddings.
-        vqvae_num_layers: Number of residual quantization layers (hierarchical codes).
         vqvae_encoder_channels: Channel dimensions for each encoder stage.
         n_vqvae_training_steps: Number of steps to train VQVAE before freezing.
         vqvae_commitment_beta: Weight for commitment loss in VQVAE training.
+        vqvae_use_cosine_sim: Whether to use cosine similarity for VQ distance.
+        vqvae_threshold_ema_dead_code: Threshold for replacing dead codes.
+        vqvae_kmeans_init: Whether to use k-means initialization for codebook.
         
         # DiT Architecture (Phase 2)
         hidden_size: Hidden dimension of DiT transformer blocks.
@@ -103,13 +105,15 @@ class VQFlowConfig(PreTrainedConfig):
     drop_n_last_frames: int = 7  # horizon - n_action_steps - n_obs_steps + 1
 
     # VQVAE Parameters (Phase 1: Action Discretization)
-    vqvae_n_embed: int = 32                    # Larger codebook than VQ-BeT for richer representation
+    vqvae_n_embed: int = 2048                    # Size of VQ codebook (number of discrete codes)
     vqvae_embedding_dim: int = 256             # Embedding dimension for quantized vectors
-    vqvae_num_layers: int = 2                  # Number of RVQ layers for hierarchical coding
     vqvae_encoder_channels: list[int] = field(default_factory=lambda: [128, 256, 512])  # Channel dims for encoder stages
     vqvae_num_groups: int = 8                  # Number of groups for GroupNorm in conv layers
     n_vqvae_training_steps: int = 20000        # Steps to train VQVAE before switching to phase 2
-    vqvae_commitment_beta: float = 0.25        # Weight for commitment loss
+    vqvae_commitment_beta: float = 1        # Weight for commitment loss
+    vqvae_use_cosine_sim: bool = False         # Use cosine similarity for VQ distance
+    vqvae_threshold_ema_dead_code: int = 2     # Threshold for replacing dead codes
+    vqvae_kmeans_init: bool = True             # Use k-means initialization for codebook
     
     # DiT Architecture (Phase 2: Discrete Flow Matching)  
     hidden_size: int = 768                     # DiT hidden dimension
@@ -157,9 +161,6 @@ class VQFlowConfig(PreTrainedConfig):
         # Validate VQVAE parameters
         if self.vqvae_n_embed <= 0:
             raise ValueError(f"vqvae_n_embed must be positive, got {self.vqvae_n_embed}")
-
-        if self.vqvae_num_layers <= 0:
-            raise ValueError(f"vqvae_num_layers must be positive, got {self.vqvae_num_layers}")
 
         if not self.vqvae_encoder_channels:
             raise ValueError("vqvae_encoder_channels cannot be empty")
@@ -215,11 +216,11 @@ class VQFlowConfig(PreTrainedConfig):
     @property
     def vocab_size(self) -> int:
         """Calculate vocabulary size for discrete flow matching.
-        
-        For RVQ with multiple layers, we flatten the hierarchical codes into a single vocabulary.
-        vocab_size = codebook_size^num_layers + 1 (for optional mask token)
+
+        For single-layer VQ, the vocabulary size is simply the codebook size.
+        vocab_size = codebook_size + 1 (for optional mask token)
         """
-        base_vocab = self.vqvae_n_embed ** self.vqvae_num_layers
+        base_vocab = self.vqvae_n_embed
         return base_vocab + 1 if self.source_distribution == "mask" else base_vocab
     
     @property
