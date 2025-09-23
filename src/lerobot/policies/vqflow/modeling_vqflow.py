@@ -271,7 +271,17 @@ class VQFlowModel(nn.Module):
         # Discrete flow matching components
         scheduler = PolynomialConvexScheduler(n=config.scheduler_power)
         self.discrete_path = MixtureDiscreteProbPath(scheduler=scheduler)
-        self.discrete_loss_fn = MixturePathGeneralizedKL(path=self.discrete_path)
+
+        # Loss function selection
+        if config.loss_function == "cross_entropy":
+            self.discrete_loss_fn = nn.CrossEntropyLoss()
+        elif config.loss_function == "generalized_kl":
+            self.discrete_loss_fn = MixturePathGeneralizedKL(path=self.discrete_path)
+        else:
+            raise ValueError(f"Unsupported loss function: {config.loss_function}")
+
+        # Store loss function type for conditional logic
+        self.loss_function_type = config.loss_function
         
     def _build_observation_encoder(self, config: VQFlowConfig):
         """Build observation encoders for different modalities."""
@@ -434,10 +444,15 @@ class VQFlowModel(nn.Module):
 
         # DiT prediction for full sequence
         logits = self.dit(x_t, t, obs_encoding)  # (B, seq_len, vocab_size)
-        
-        # Compute generalized KL divergence loss
-        loss = self.discrete_loss_fn(logits=logits, x_1=x_1, x_t=x_t, t=t)
-        
+
+        # Compute loss based on configuration
+        if self.loss_function_type == "cross_entropy":
+            # Simple classification loss
+            loss = self.discrete_loss_fn(logits.flatten(0, 1), x_1.flatten(0, 1))
+        else:  # generalized_kl
+            # Path-aware flow matching loss
+            loss = self.discrete_loss_fn(logits=logits, x_1=x_1, x_t=x_t, t=t)
+
         return loss
 
 

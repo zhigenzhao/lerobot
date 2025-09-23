@@ -65,6 +65,7 @@ class VQFlowConfig(PreTrainedConfig):
         scheduler_power: Power parameter for polynomial convex scheduler (σ_t = (1-t)^n).
         num_integration_steps: Number of ODE integration steps during inference.
         flow_epsilon: Small epsilon to avoid numerical issues at t=1.
+        loss_function: Loss function type ("generalized_kl" or "cross_entropy").
         
         # Vision Processing (same as other policies)
         vision_backbone: ResNet backbone for image encoding.
@@ -124,10 +125,11 @@ class VQFlowConfig(PreTrainedConfig):
     use_adaln_zero: bool = True                # Use AdaLN-Zero initialization
     
     # Discrete Flow Matching Configuration
-    source_distribution: str = "uniform"       # Source distribution type: "uniform" or "mask"  
+    source_distribution: str = "uniform"       # Source distribution type: "uniform" or "mask"
     scheduler_power: float = 2.0               # Power for polynomial scheduler: σ_t = (1-t)^n
     num_integration_steps: int = 50            # ODE integration steps for inference
     flow_epsilon: float = 1e-3                # Small epsilon to avoid t=1 singularity
+    loss_function: str = "generalized_kl"     # Loss function type: "generalized_kl" or "cross_entropy"
     
     # Vision backbone (same as other policies)
     vision_backbone: str = "resnet18"
