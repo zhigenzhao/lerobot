@@ -29,7 +29,7 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from torch import Tensor, nn
 
-from lerobot.constants import OBS_ENV_STATE, OBS_STATE
+from lerobot.utils.constants import OBS_ENV_STATE, OBS_STATE
 from lerobot.policies.hybrid_diffusion.configuration_hybrid_diffusion import HybridDiffusionConfig
 from lerobot.policies.utils import (
     get_device_from_parameters,

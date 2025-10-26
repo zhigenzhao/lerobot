@@ -45,6 +45,7 @@ from lerobot.policies.sac.reward_model.configuration_classifier import RewardCla
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.policies.vqbet.configuration_vqbet import VQBeTConfig
+from lerobot.policies.vqflow.configuration_vqflow import VQFlowConfig
 from lerobot.processor import PolicyAction, PolicyProcessorPipeline
 from lerobot.processor.converters import (
     batch_to_transition,
@@ -61,7 +62,6 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
 
     This function uses dynamic imports to avoid loading all policy classes into memory
     at once, improving startup time and reducing dependencies.
-from lerobot.policies.vqflow.configuration_vqflow import VQFlowConfig
 
     Args:
         name: The name of the policy. Supported names are "tdmpc", "diffusion", "act",
@@ -374,6 +374,62 @@ def make_pre_post_processors(
         from lerobot.policies.groot.processor_groot import make_groot_pre_post_processors
 
         processors = make_groot_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, VQFlowConfig):
+        from lerobot.policies.vqflow.processor_vqflow import make_vqflow_pre_post_processors
+
+        processors = make_vqflow_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, DiffusionDiTConfig):
+        from lerobot.policies.diffusion_dit.processor_diffusion_dit import make_diffusion_dit_pre_post_processors
+
+        processors = make_diffusion_dit_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, DiffusionTransformerConfig):
+        from lerobot.policies.diffusion_transformer.processor_diffusion_transformer import make_diffusion_transformer_pre_post_processors
+
+        processors = make_diffusion_transformer_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, FlowMatchingConfig):
+        from lerobot.policies.flow_matching.processor_flow_matching import make_flow_matching_pre_post_processors
+
+        processors = make_flow_matching_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, FlowMatchingDiTConfig):
+        from lerobot.policies.flow_matching_dit.processor_flow_matching_dit import make_flow_matching_dit_pre_post_processors
+
+        processors = make_flow_matching_dit_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, FlowMatchingTransformerConfig):
+        from lerobot.policies.flow_matching_transformer.processor_flow_matching_transformer import make_flow_matching_transformer_pre_post_processors
+
+        processors = make_flow_matching_transformer_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, HybridDiffusionConfig):
+        from lerobot.policies.hybrid_diffusion.processor_hybrid_diffusion import make_hybrid_diffusion_pre_post_processors
+
+        processors = make_hybrid_diffusion_pre_post_processors(
             config=policy_cfg,
             dataset_stats=kwargs.get("dataset_stats"),
         )

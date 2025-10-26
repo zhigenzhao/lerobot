@@ -30,11 +30,10 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from torch import Tensor, nn
 
-from lerobot.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 from lerobot.policies.diffusion_transformer.configuration_diffusion_transformer import (
     DiffusionTransformerConfig,
 )
-from lerobot.policies.normalize import Normalize, Unnormalize
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import (
     get_device_from_parameters,
@@ -56,25 +55,16 @@ class DiffusionTransformerPolicy(PreTrainedPolicy):
 
     def __init__(
         self,
-        config: DiffusionTransformerConfig,
-        dataset_stats: dict[str, dict[str, Tensor]] | None = None,
-    ):
+        config: DiffusionTransformerConfig):
         """
         Args:
             config: Policy configuration class instance or None, in which case the default instantiation of
                 the configuration class is used.
-            dataset_stats: Dataset statistics to be used for normalization. If not passed here, it is expected
-                that they will be passed with a call to `load_state_dict` before the policy is used.
-        """
+            
+        Note: Normalization is handled by external preprocessor/postprocessor pipelines."""
         super().__init__(config)
         config.validate_features()
-        self.config = config
-
-        self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
-        self.normalize_targets = Normalize(config.output_features, config.normalization_mapping, dataset_stats)
-        self.unnormalize_outputs = Unnormalize(config.output_features, config.normalization_mapping, dataset_stats)
-
-        # queues are populated during rollout of the policy, they contain the n latest observations and actions
+        self.config = config        # queues are populated during rollout of the policy, they contain the n latest observations and actions
         self._queues = None
 
         self.diffusion = DiffusionTransformerModel(config)
@@ -99,15 +89,13 @@ class DiffusionTransformerPolicy(PreTrainedPolicy):
         """Stateless method to generate actions from prepared observations."""
         actions = self.diffusion.generate_actions(batch)
         # TODO(rcadene): make above methods return output dictionary?
-        actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
         return actions
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
         """Predict a chunk of actions given environment observations."""
         # Normalize and prepare batch
-        batch = self.normalize_inputs(batch)
-        if self.config.image_features:
+                if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
 
@@ -145,8 +133,7 @@ class DiffusionTransformerPolicy(PreTrainedPolicy):
         if ACTION in batch:
             batch.pop(ACTION)
 
-        batch = self.normalize_inputs(batch)
-        if self.config.image_features:
+                if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
         # NOTE: It's important that this happens after stacking the images into a single key.
@@ -163,12 +150,10 @@ class DiffusionTransformerPolicy(PreTrainedPolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
         """Run the batch through the model and compute the loss for training or validation."""
-        batch = self.normalize_inputs(batch)
-        if self.config.image_features:
+                if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-        batch = self.normalize_targets(batch)
-        loss = self.diffusion.compute_loss(batch)
+                loss = self.diffusion.compute_loss(batch)
         # no output_dict so returning None
         return loss, None
 

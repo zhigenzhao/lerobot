@@ -30,11 +30,10 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from lerobot.configs.types import FeatureType, PolicyFeature
-from lerobot.constants import ACTION, OBS_IMAGES
+from lerobot.utils.constants import ACTION, OBS_IMAGES
 from lerobot.policies.hybrid_diffusion.diffusion_components import HybridDiffusionModel
 from lerobot.policies.hybrid_diffusion.configuration_hybrid_diffusion import HybridDiffusionConfig
 from lerobot.policies.hybrid_diffusion.vae_action_encoder import DiscreteActionVAE
-from lerobot.policies.normalize import Normalize, Unnormalize
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import (
     get_device_from_parameters,
@@ -64,15 +63,12 @@ class HybridDiffusionPolicy(PreTrainedPolicy):
 
     def __init__(
         self,
-        config: HybridDiffusionConfig,
-        dataset_stats: dict[str, dict[str, Tensor]] | None = None,
-    ):
+        config: HybridDiffusionConfig):
         """
         Args:
             config: Policy configuration instance.
-            dataset_stats: Dataset statistics for normalization. If not provided,
-                they should be loaded via load_state_dict before using the policy.
-        """
+            
+        Note: Normalization is handled by external preprocessor/postprocessor pipelines."""
         super().__init__(config)
         config.validate_features()
         self.config = config
@@ -89,12 +85,7 @@ class HybridDiffusionPolicy(PreTrainedPolicy):
         self.discrete_dim = config.discrete_action_dim
         self.total_action_dim = self.continuous_dim + self.discrete_dim
 
-        # Initialize normalizers
-        self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
-        self.normalize_targets = Normalize(config.output_features, config.normalization_mapping, dataset_stats)
-        self.unnormalize_outputs = Unnormalize(config.output_features, config.normalization_mapping, dataset_stats)
-
-        # Initialize VAE for discrete actions (if present)
+        # Initialize normalizers        # Initialize VAE for discrete actions (if present)
         self.vae = None
         self.vae_trained = False
         if self.has_discrete:
@@ -298,15 +289,12 @@ class HybridDiffusionPolicy(PreTrainedPolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training."""
-        batch = self.normalize_inputs(batch)
-        batch = dict(batch)  # Shallow copy
+                batch = dict(batch)  # Shallow copy
 
         if self.config.image_features:
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
 
-        batch = self.normalize_targets(batch)
-
-        # Stage 1: Train VAE for discrete actions
+                # Stage 1: Train VAE for discrete actions
         if self.has_discrete and self.training_step < self.config.n_vae_training_steps:
             # Split concatenated action to get discrete part
             action = batch["action"]
@@ -360,8 +348,7 @@ class HybridDiffusionPolicy(PreTrainedPolicy):
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         """Predict a chunk of actions given environment observations."""
-        batch = self.normalize_inputs(batch)
-        if self.config.image_features:
+                if self.config.image_features:
             batch = dict(batch)  # shallow copy
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
 
@@ -390,8 +377,7 @@ class HybridDiffusionPolicy(PreTrainedPolicy):
             if action_key in batch:
                 batch.pop(action_key)
 
-        batch = self.normalize_inputs(batch)
-        if self.config.image_features:
+                if self.config.image_features:
             batch = dict(batch)  # shallow copy
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
 

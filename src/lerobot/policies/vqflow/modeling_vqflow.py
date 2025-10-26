@@ -14,7 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""VQFlow Policy: Vector Quantized Actions + Discrete Flow Matching with DiT backbone."""
+"""VQFlow Policy: Vector Quantized Actions + Discrete Flow Matching with DiT backbone.
+
+Note: This policy expects data to be normalized by external pre/post processors.
+Normalization is handled by processor_vqflow.py in the training pipeline.
+"""
 
 from collections import deque
 from typing import Optional
@@ -31,8 +35,7 @@ from flow_matching.path.scheduler import PolynomialConvexScheduler
 from flow_matching.solver import MixtureDiscreteEulerSolver
 from torch import Tensor
 
-from lerobot.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
-from lerobot.policies.normalize import Normalize, Unnormalize
+from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import (
     get_device_from_parameters,
@@ -68,16 +71,10 @@ class VQFlowPolicy(PreTrainedPolicy):
     def __init__(
         self,
         config: VQFlowConfig,
-        dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
         super().__init__(config)
         config.validate_features()
         self.config = config
-        
-        # Normalization
-        self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
-        self.normalize_targets = Normalize(config.output_features, config.normalization_mapping, dataset_stats)
-        self.unnormalize_outputs = Unnormalize(config.output_features, config.normalization_mapping, dataset_stats)
         
         # Observation queues for rollout
         self._queues = None
@@ -137,62 +134,67 @@ class VQFlowPolicy(PreTrainedPolicy):
     def _get_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
         """Stateless method to generate actions from prepared observations."""
         actions = self.vqflow.generate_actions(batch)
-        actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
         return actions
     
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
-        """Predict a chunk of actions given environment observations."""
-        # Normalize and prepare batch
-        batch = self.normalize_inputs(batch)
+        """Predict a chunk of actions given environment observations.
+
+        Note: Assumes batch is already normalized by external preprocessor.
+        """
+        # Prepare batch
         if self.config.image_features:
             batch = dict(batch)
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-        
+
         # Populate queues with current batch
         self._queues = populate_queues(self._queues, batch)
-        
+
         # Stack observations from queues
         prepared_batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
-        
+
         return self._get_action_chunk(prepared_batch)
     
-    @torch.no_grad() 
+    @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
-        """Select a single action given environment observations."""
+        """Select a single action given environment observations.
+
+        Note: Assumes batch is already normalized by external preprocessor.
+        Returns unnormalized action (postprocessor handles unnormalization).
+        """
         # Remove action from batch if present (for offline evaluation)
         if ACTION in batch:
             batch.pop(ACTION)
-        
-        batch = self.normalize_inputs(batch)
+
         if self.config.image_features:
             batch = dict(batch)
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-        
+
         self._queues = populate_queues(self._queues, batch)
-        
+
         if len(self._queues[ACTION]) == 0:
             # Generate new action chunk
             prepared_batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
             actions = self._get_action_chunk(prepared_batch)
             self._queues[ACTION].extend(actions.transpose(0, 1))
-        
+
         action = self._queues[ACTION].popleft()
         return action
     
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
-        """Forward pass for training."""
+        """Forward pass for training.
+
+        Note: Assumes batch is already normalized by external preprocessor.
+        """
         # Update training step
         self.training_step += 1
 
-        # Normalize inputs and targets
-        batch = self.normalize_inputs(batch)
+        # Prepare batch
         batch = dict(batch)
         if self.config.image_features:
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
         if self.config.env_state_feature:
             pass  # Keep OBS_ENV_STATE as is
-        batch = self.normalize_targets(batch)
 
         # Compute loss based on current phase
         if self.current_phase == 1:
