@@ -31,6 +31,12 @@ from lerobot.envs.utils import env_to_policy_features
 from lerobot.policies.act.configuration_act import ACTConfig
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.groot.configuration_groot import GrootConfig
+from lerobot.policies.diffusion_transformer.configuration_diffusion_transformer import DiffusionTransformerConfig
+from lerobot.policies.diffusion_dit.configuration_diffusion_dit import DiffusionDiTConfig
+from lerobot.policies.flow_matching_dit.configuration_flow_matching_dit import FlowMatchingDiTConfig
+from lerobot.policies.flow_matching.configuration_flow_matching import FlowMatchingConfig
+from lerobot.policies.flow_matching_transformer.configuration_flow_matching_transformer import FlowMatchingTransformerConfig
+from lerobot.policies.hybrid_diffusion.configuration_hybrid_diffusion import HybridDiffusionConfig
 from lerobot.policies.pi0.configuration_pi0 import PI0Config
 from lerobot.policies.pi05.configuration_pi05 import PI05Config
 from lerobot.policies.pretrained import PreTrainedPolicy
@@ -55,6 +61,7 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
 
     This function uses dynamic imports to avoid loading all policy classes into memory
     at once, improving startup time and reducing dependencies.
+from lerobot.policies.vqflow.configuration_vqflow import VQFlowConfig
 
     Args:
         name: The name of the policy. Supported names are "tdmpc", "diffusion", "act",
@@ -74,6 +81,26 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 
         return DiffusionPolicy
+    elif name == "diffusion_transformer":
+        from lerobot.policies.diffusion_transformer.modeling_diffusion_transformer import DiffusionTransformerPolicy
+
+        return DiffusionTransformerPolicy
+    elif name == "flow_matching":
+        from lerobot.policies.flow_matching.modeling_flow_matching import FlowMatchingPolicy
+
+        return FlowMatchingPolicy
+    elif name == "flow_matching_transformer":
+        from lerobot.policies.flow_matching_transformer.modeling_flow_matching_transformer import FlowMatchingTransformerPolicy
+
+        return FlowMatchingTransformerPolicy
+    elif name == "diffusion_dit":
+        from lerobot.policies.diffusion_dit.modeling_diffusion_dit import DiffusionDiTPolicy
+
+        return DiffusionDiTPolicy
+    elif name == "flow_matching_dit":
+        from lerobot.policies.flow_matching_dit.modeling_flow_matching_dit import FlowMatchingDiTPolicy
+
+        return FlowMatchingDiTPolicy
     elif name == "act":
         from lerobot.policies.act.modeling_act import ACTPolicy
 
@@ -82,6 +109,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from lerobot.policies.vqbet.modeling_vqbet import VQBeTPolicy
 
         return VQBeTPolicy
+    elif name == "vqflow":
+        from lerobot.policies.vqflow.modeling_vqflow import VQFlowPolicy
+
+        return VQFlowPolicy
     elif name == "pi0":
         from lerobot.policies.pi0.modeling_pi0 import PI0Policy
 
@@ -106,6 +137,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from lerobot.policies.groot.modeling_groot import GrootPolicy
 
         return GrootPolicy
+    elif name == "hybrid_diffusion":
+        from lerobot.policies.hybrid_diffusion.modeling_hybrid_diffusion import HybridDiffusionPolicy
+
+        return HybridDiffusionPolicy
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -133,10 +168,22 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return TDMPCConfig(**kwargs)
     elif policy_type == "diffusion":
         return DiffusionConfig(**kwargs)
+    elif policy_type == "diffusion_transformer":
+        return DiffusionTransformerConfig(**kwargs)
+    elif policy_type == "flow_matching":
+        return FlowMatchingConfig(**kwargs)
+    elif policy_type == "flow_matching_transformer":
+        return FlowMatchingTransformerConfig(**kwargs)
+    elif policy_type == "diffusion_dit":
+        return DiffusionDiTConfig(**kwargs)
+    elif policy_type == "flow_matching_dit":
+        return FlowMatchingDiTConfig(**kwargs)
     elif policy_type == "act":
         return ACTConfig(**kwargs)
     elif policy_type == "vqbet":
         return VQBeTConfig(**kwargs)
+    elif policy_type == "vqflow":
+        return VQFlowConfig(**kwargs)
     elif policy_type == "pi0":
         return PI0Config(**kwargs)
     elif policy_type == "pi05":
@@ -149,6 +196,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return RewardClassifierConfig(**kwargs)
     elif policy_type == "groot":
         return GrootConfig(**kwargs)
+    elif policy_type == "hybrid_diffusion":
+        return HybridDiffusionConfig(**kwargs)
     else:
         raise ValueError(f"Policy type '{policy_type}' is not available.")
 

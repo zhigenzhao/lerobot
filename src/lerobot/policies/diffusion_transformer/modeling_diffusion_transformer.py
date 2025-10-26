@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
-# Copyright 2024 Columbia Artificial Intelligence, Robotics Lab,
-# and The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 Zhigen Zhao (zhaozhigen@gmail.com)
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Diffusion Policy as per "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"
-
-TODO(alexander-soare):
-  - Remove reliance on diffusers for DDPMScheduler and LR scheduler.
+"""Diffusion Transformer Policy as per "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"
+using Transformer architecture instead of UNet.
 """
 
 import math
@@ -33,7 +30,11 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from torch import Tensor, nn
 
-from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
+from lerobot.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
+from lerobot.policies.diffusion_transformer.configuration_diffusion_transformer import (
+    DiffusionTransformerConfig,
+)
+from lerobot.policies.normalize import Normalize, Unnormalize
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import (
     get_device_from_parameters,
@@ -41,21 +42,22 @@ from lerobot.policies.utils import (
     get_output_shape,
     populate_queues,
 )
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 
 
-class DiffusionPolicy(PreTrainedPolicy):
+class DiffusionTransformerPolicy(PreTrainedPolicy):
     """
-    Diffusion Policy as per "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"
+    Diffusion Policy using Transformer architecture as backbone instead of UNet.
+    Based on "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"
     (paper: https://huggingface.co/papers/2303.04137, code: https://github.com/real-stanford/diffusion_policy).
     """
 
-    config_class = DiffusionConfig
-    name = "diffusion"
+    config_class = DiffusionTransformerConfig
+    name = "diffusion_transformer"
 
     def __init__(
         self,
-        config: DiffusionConfig,
+        config: DiffusionTransformerConfig,
+        dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
         """
         Args:
@@ -68,10 +70,14 @@ class DiffusionPolicy(PreTrainedPolicy):
         config.validate_features()
         self.config = config
 
+        self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
+        self.normalize_targets = Normalize(config.output_features, config.normalization_mapping, dataset_stats)
+        self.unnormalize_outputs = Unnormalize(config.output_features, config.normalization_mapping, dataset_stats)
+
         # queues are populated during rollout of the policy, they contain the n latest observations and actions
         self._queues = None
 
-        self.diffusion = DiffusionModel(config)
+        self.diffusion = DiffusionTransformerModel(config)
 
         self.reset()
 
@@ -81,13 +87,13 @@ class DiffusionPolicy(PreTrainedPolicy):
     def reset(self):
         """Clear observation and action queues. Should be called on `env.reset()`"""
         self._queues = {
-            OBS_STATE: deque(maxlen=self.config.n_obs_steps),
-            ACTION: deque(maxlen=self.config.n_action_steps),
+            "observation.state": deque(maxlen=self.config.n_obs_steps),
+            "action": deque(maxlen=self.config.n_action_steps),
         }
         if self.config.image_features:
-            self._queues[OBS_IMAGES] = deque(maxlen=self.config.n_obs_steps)
+            self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
-            self._queues[OBS_ENV_STATE] = deque(maxlen=self.config.n_obs_steps)
+            self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
 
     def _get_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
         """Stateless method to generate actions from prepared observations."""
@@ -97,7 +103,7 @@ class DiffusionPolicy(PreTrainedPolicy):
         return actions
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
         """Predict a chunk of actions given environment observations."""
         # Normalize and prepare batch
         batch = self.normalize_inputs(batch)
@@ -110,10 +116,11 @@ class DiffusionPolicy(PreTrainedPolicy):
 
         # Stack observations from queues
         prepared_batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
+
         return self._get_action_chunk(prepared_batch)
 
     @torch.no_grad()
-    def select_action(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+    def select_action(self, batch: dict[str, Tensor]) -> Tensor:
         """Select a single action given environment observations.
 
         This method handles caching a history of observations and an action trajectory generated by the
@@ -138,6 +145,7 @@ class DiffusionPolicy(PreTrainedPolicy):
         if ACTION in batch:
             batch.pop(ACTION)
 
+        batch = self.normalize_inputs(batch)
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
@@ -155,9 +163,11 @@ class DiffusionPolicy(PreTrainedPolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
         """Run the batch through the model and compute the loss for training or validation."""
+        batch = self.normalize_inputs(batch)
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
+        batch = self.normalize_targets(batch)
         loss = self.diffusion.compute_loss(batch)
         # no output_dict so returning None
         return loss, None
@@ -176,8 +186,8 @@ def _make_noise_scheduler(name: str, **kwargs: dict) -> DDPMScheduler | DDIMSche
         raise ValueError(f"Unsupported noise scheduler type {name}")
 
 
-class DiffusionModel(nn.Module):
-    def __init__(self, config: DiffusionConfig):
+class DiffusionTransformerModel(nn.Module):
+    def __init__(self, config: DiffusionTransformerConfig):
         super().__init__()
         self.config = config
 
@@ -195,7 +205,7 @@ class DiffusionModel(nn.Module):
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
 
-        self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
+        self.transformer = DiffusionTransformer1d(config, global_cond_dim=global_cond_dim)
 
         self.noise_scheduler = _make_noise_scheduler(
             config.noise_scheduler_type,
@@ -219,28 +229,27 @@ class DiffusionModel(nn.Module):
         batch_size: int,
         global_cond: Tensor | None = None,
         generator: torch.Generator | None = None,
-        noise: Tensor | None = None,
     ) -> Tensor:
         device = get_device_from_parameters(self)
         dtype = get_dtype_from_parameters(self)
 
         # Sample prior.
-        sample = (
-            noise
-            if noise is not None
-            else torch.randn(
-                size=(batch_size, self.config.horizon, self.config.action_feature.shape[0]),
-                dtype=dtype,
-                device=device,
-                generator=generator,
-            )
+        sample = torch.randn(
+            size=(
+                batch_size,
+                self.config.horizon,
+                self.config.action_feature.shape[0],
+            ),
+            dtype=dtype,
+            device=device,
+            generator=generator,
         )
 
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
 
         for t in self.noise_scheduler.timesteps:
             # Predict model output.
-            model_output = self.unet(
+            model_output = self.transformer(
                 sample,
                 torch.full(sample.shape[:1], t, dtype=torch.long, device=sample.device),
                 global_cond=global_cond,
@@ -258,27 +267,30 @@ class DiffusionModel(nn.Module):
         if self.config.image_features:
             if self.config.use_separate_rgb_encoder_per_camera:
                 # Combine batch and sequence dims while rearranging to make the camera index dimension first.
-                images_per_camera = einops.rearrange(batch[OBS_IMAGES], "b s n ... -> n (b s) ...")
+                images_per_camera = einops.rearrange(batch["observation.images"], "b s n ... -> n (b s) ...")
                 img_features_list = torch.cat(
-                    [
-                        encoder(images)
-                        for encoder, images in zip(self.rgb_encoder, images_per_camera, strict=True)
-                    ]
+                    [encoder(images) for encoder, images in zip(self.rgb_encoder, images_per_camera, strict=True)]
                 )
                 # Separate batch and sequence dims back out. The camera index dim gets absorbed into the
                 # feature dim (effectively concatenating the camera features).
                 img_features = einops.rearrange(
-                    img_features_list, "(n b s) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
+                    img_features_list,
+                    "(n b s) ... -> b s (n ...)",
+                    b=batch_size,
+                    s=n_obs_steps,
                 )
             else:
                 # Combine batch, sequence, and "which camera" dims before passing to shared encoder.
                 img_features = self.rgb_encoder(
-                    einops.rearrange(batch[OBS_IMAGES], "b s n ... -> (b s n) ...")
+                    einops.rearrange(batch["observation.images"], "b s n ... -> (b s n) ...")
                 )
                 # Separate batch dim and sequence dim back out. The camera index dim gets absorbed into the
                 # feature dim (effectively concatenating the camera features).
                 img_features = einops.rearrange(
-                    img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
+                    img_features,
+                    "(b s n) ... -> b s (n ...)",
+                    b=batch_size,
+                    s=n_obs_steps,
                 )
             global_cond_feats.append(img_features)
 
@@ -288,7 +300,7 @@ class DiffusionModel(nn.Module):
         # Concatenate features then flatten to (B, global_cond_dim).
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
 
-    def generate_actions(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+    def generate_actions(self, batch: dict[str, Tensor]) -> Tensor:
         """
         This function expects `batch` to have:
         {
@@ -299,14 +311,14 @@ class DiffusionModel(nn.Module):
             "observation.environment_state": (B, n_obs_steps, environment_dim)
         }
         """
-        batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
+        batch_size, n_obs_steps = batch["observation.state"].shape[:2]
         assert n_obs_steps == self.config.n_obs_steps
 
         # Encode image features and concatenate them all together along with the state vector.
         global_cond = self._prepare_global_conditioning(batch)  # (B, global_cond_dim)
 
         # run sampling
-        actions = self.conditional_sample(batch_size, global_cond=global_cond, noise=noise)
+        actions = self.conditional_sample(batch_size, global_cond=global_cond)
 
         # Extract `n_action_steps` steps worth of actions (from the current observation).
         start = n_obs_steps - 1
@@ -330,10 +342,10 @@ class DiffusionModel(nn.Module):
         }
         """
         # Input validation.
-        assert set(batch).issuperset({OBS_STATE, ACTION, "action_is_pad"})
-        assert OBS_IMAGES in batch or OBS_ENV_STATE in batch
-        n_obs_steps = batch[OBS_STATE].shape[1]
-        horizon = batch[ACTION].shape[1]
+        assert set(batch).issuperset({"observation.state", "action", "action_is_pad"})
+        assert "observation.images" in batch or "observation.environment_state" in batch
+        n_obs_steps = batch["observation.state"].shape[1]
+        horizon = batch["action"].shape[1]
         assert horizon == self.config.horizon
         assert n_obs_steps == self.config.n_obs_steps
 
@@ -341,7 +353,7 @@ class DiffusionModel(nn.Module):
         global_cond = self._prepare_global_conditioning(batch)  # (B, global_cond_dim)
 
         # Forward diffusion.
-        trajectory = batch[ACTION]
+        trajectory = batch["action"]
         # Sample noise to add to the trajectory.
         eps = torch.randn(trajectory.shape, device=trajectory.device)
         # Sample a random noising timestep for each item in the batch.
@@ -355,14 +367,14 @@ class DiffusionModel(nn.Module):
         noisy_trajectory = self.noise_scheduler.add_noise(trajectory, eps, timesteps)
 
         # Run the denoising network (that might denoise the trajectory, or attempt to predict the noise).
-        pred = self.unet(noisy_trajectory, timesteps, global_cond=global_cond)
+        pred = self.transformer(noisy_trajectory, timesteps, global_cond=global_cond)
 
         # Compute the loss.
         # The target is either the original trajectory, or the noise.
         if self.config.prediction_type == "epsilon":
             target = eps
         elif self.config.prediction_type == "sample":
-            target = batch[ACTION]
+            target = batch["action"]
         else:
             raise ValueError(f"Unsupported prediction type {self.config.prediction_type}")
 
@@ -372,8 +384,7 @@ class DiffusionModel(nn.Module):
         if self.config.do_mask_loss_for_padding:
             if "action_is_pad" not in batch:
                 raise ValueError(
-                    "You need to provide 'action_is_pad' in the batch when "
-                    f"{self.config.do_mask_loss_for_padding=}."
+                    "You need to provide 'action_is_pad' in the batch when " f"{self.config.do_mask_loss_for_padding=}."
                 )
             in_episode_bound = ~batch["action_is_pad"]
             loss = loss * in_episode_bound.unsqueeze(-1)
@@ -424,7 +435,10 @@ class SpatialSoftmax(nn.Module):
 
         # we could use torch.linspace directly but that seems to behave slightly differently than numpy
         # and causes a small degradation in pc_success of pre-trained models.
-        pos_x, pos_y = np.meshgrid(np.linspace(-1.0, 1.0, self._in_w), np.linspace(-1.0, 1.0, self._in_h))
+        pos_x, pos_y = np.meshgrid(
+            np.linspace(-1.0, 1.0, self._in_w),
+            np.linspace(-1.0, 1.0, self._in_h),
+        )
         pos_x = torch.from_numpy(pos_x.reshape(self._in_h * self._in_w, 1)).float()
         pos_y = torch.from_numpy(pos_y.reshape(self._in_h * self._in_w, 1)).float()
         # register as buffer so it's moved to the correct device.
@@ -458,7 +472,7 @@ class DiffusionRgbEncoder(nn.Module):
     Includes the ability to normalize and crop the image first.
     """
 
-    def __init__(self, config: DiffusionConfig):
+    def __init__(self, config: DiffusionTransformerConfig):
         super().__init__()
         # Set up optional preprocessing.
         if config.crop_shape is not None:
@@ -473,17 +487,13 @@ class DiffusionRgbEncoder(nn.Module):
             self.do_crop = False
 
         # Set up backbone.
-        backbone_model = getattr(torchvision.models, config.vision_backbone)(
-            weights=config.pretrained_backbone_weights
-        )
+        backbone_model = getattr(torchvision.models, config.vision_backbone)(weights=config.pretrained_backbone_weights)
         # Note: This assumes that the layer4 feature map is children()[-3]
         # TODO(alexander-soare): Use a safer alternative.
         self.backbone = nn.Sequential(*(list(backbone_model.children())[:-2]))
         if config.use_group_norm:
             if config.pretrained_backbone_weights:
-                raise ValueError(
-                    "You can't replace BatchNorm in a pretrained model without ruining the weights!"
-                )
+                raise ValueError("You can't replace BatchNorm in a pretrained model without ruining the weights!")
             self.backbone = _replace_submodules(
                 root_module=self.backbone,
                 predicate=lambda x: isinstance(x, nn.BatchNorm2d),
@@ -529,7 +539,9 @@ class DiffusionRgbEncoder(nn.Module):
 
 
 def _replace_submodules(
-    root_module: nn.Module, predicate: Callable[[nn.Module], bool], func: Callable[[nn.Module], nn.Module]
+    root_module: nn.Module,
+    predicate: Callable[[nn.Module], bool],
+    func: Callable[[nn.Module], nn.Module],
 ) -> nn.Module:
     """
     Args:
@@ -578,202 +590,263 @@ class DiffusionSinusoidalPosEmb(nn.Module):
         return emb
 
 
-class DiffusionConv1dBlock(nn.Module):
-    """Conv1d --> GroupNorm --> Mish"""
-
-    def __init__(self, inp_channels, out_channels, kernel_size, n_groups=8):
+class DiffusionConditioningEncoder(nn.Module):
+    """Stanford-style conditioning encoder for timestep and observation conditioning."""
+    
+    def __init__(self, config: DiffusionTransformerConfig, global_cond_dim: int):
         super().__init__()
-
-        self.block = nn.Sequential(
-            nn.Conv1d(inp_channels, out_channels, kernel_size, padding=kernel_size // 2),
-            nn.GroupNorm(n_groups, out_channels),
-            nn.Mish(),
-        )
-
-    def forward(self, x):
-        return self.block(x)
-
-
-class DiffusionConditionalUnet1d(nn.Module):
-    """A 1D convolutional UNet with FiLM modulation for conditioning.
-
-    Note: this removes local conditioning as compared to the original diffusion policy code.
-    """
-
-    def __init__(self, config: DiffusionConfig, global_cond_dim: int):
-        super().__init__()
-
         self.config = config
-
-        # Encoder for the diffusion timestep.
-        self.diffusion_step_encoder = nn.Sequential(
-            DiffusionSinusoidalPosEmb(config.diffusion_step_embed_dim),
-            nn.Linear(config.diffusion_step_embed_dim, config.diffusion_step_embed_dim * 4),
-            nn.Mish(),
-            nn.Linear(config.diffusion_step_embed_dim * 4, config.diffusion_step_embed_dim),
-        )
-
-        # The FiLM conditioning dimension.
-        cond_dim = config.diffusion_step_embed_dim + global_cond_dim
-
-        # In channels / out channels for each downsampling block in the Unet's encoder. For the decoder, we
-        # just reverse these.
-        in_out = [(config.action_feature.shape[0], config.down_dims[0])] + list(
-            zip(config.down_dims[:-1], config.down_dims[1:], strict=True)
-        )
-
-        # Unet encoder.
-        common_res_block_kwargs = {
-            "cond_dim": cond_dim,
-            "kernel_size": config.kernel_size,
-            "n_groups": config.n_groups,
-            "use_film_scale_modulation": config.use_film_scale_modulation,
-        }
-        self.down_modules = nn.ModuleList([])
-        for ind, (dim_in, dim_out) in enumerate(in_out):
-            is_last = ind >= (len(in_out) - 1)
-            self.down_modules.append(
-                nn.ModuleList(
-                    [
-                        DiffusionConditionalResidualBlock1d(dim_in, dim_out, **common_res_block_kwargs),
-                        DiffusionConditionalResidualBlock1d(dim_out, dim_out, **common_res_block_kwargs),
-                        # Downsample as long as it is not the last block.
-                        nn.Conv1d(dim_out, dim_out, 3, 2, 1) if not is_last else nn.Identity(),
-                    ]
-                )
+        
+        # Time embedding (Stanford's time_emb)
+        self.time_emb = DiffusionSinusoidalPosEmb(config.attention_embed_dim)
+        
+        # Observation embedding (Stanford's cond_obs_emb)
+        self.cond_obs_emb = nn.Linear(global_cond_dim, config.attention_embed_dim)
+        
+        # Conditioning positional embedding (Stanford's cond_pos_emb)
+        # T_cond = 1 (time) + n_obs_steps (observations)
+        T_cond = 1 + config.n_obs_steps
+        self.cond_pos_emb = nn.Parameter(torch.zeros(1, T_cond, config.attention_embed_dim))
+        
+        # Dropout (Stanford's drop)
+        self.drop = nn.Dropout(config.embedding_dropout)
+        
+        # Encoder (Stanford's encoder when n_cond_layers > 0)
+        if config.n_conditioning_layers > 0:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=config.attention_embed_dim,
+                nhead=config.n_attention_heads,
+                dim_feedforward=4 * config.attention_embed_dim,
+                dropout=config.attention_dropout,
+                activation='gelu',
+                batch_first=True,
+                norm_first=True
             )
-
-        # Processing in the middle of the auto-encoder.
-        self.mid_modules = nn.ModuleList(
-            [
-                DiffusionConditionalResidualBlock1d(
-                    config.down_dims[-1], config.down_dims[-1], **common_res_block_kwargs
-                ),
-                DiffusionConditionalResidualBlock1d(
-                    config.down_dims[-1], config.down_dims[-1], **common_res_block_kwargs
-                ),
-            ]
-        )
-
-        # Unet decoder.
-        self.up_modules = nn.ModuleList([])
-        for ind, (dim_out, dim_in) in enumerate(reversed(in_out[1:])):
-            is_last = ind >= (len(in_out) - 1)
-            self.up_modules.append(
-                nn.ModuleList(
-                    [
-                        # dim_in * 2, because it takes the encoder's skip connection as well
-                        DiffusionConditionalResidualBlock1d(dim_in * 2, dim_out, **common_res_block_kwargs),
-                        DiffusionConditionalResidualBlock1d(dim_out, dim_out, **common_res_block_kwargs),
-                        # Upsample as long as it is not the last block.
-                        nn.ConvTranspose1d(dim_out, dim_out, 4, 2, 1) if not is_last else nn.Identity(),
-                    ]
-                )
+            self.encoder = nn.TransformerEncoder(
+                encoder_layer=encoder_layer,
+                num_layers=config.n_conditioning_layers
             )
-
-        self.final_conv = nn.Sequential(
-            DiffusionConv1dBlock(config.down_dims[0], config.down_dims[0], kernel_size=config.kernel_size),
-            nn.Conv1d(config.down_dims[0], config.action_feature.shape[0], 1),
-        )
-
-    def forward(self, x: Tensor, timestep: Tensor | int, global_cond=None) -> Tensor:
+        else:
+            # Stanford fallback when n_cond_layers == 0
+            self.encoder = nn.Sequential(
+                nn.Linear(config.attention_embed_dim, 4 * config.attention_embed_dim),
+                nn.Mish(),
+                nn.Linear(4 * config.attention_embed_dim, config.attention_embed_dim)
+            )
+    
+    def forward(self, timestep: Tensor, global_cond: Tensor) -> Tensor:
         """
         Args:
-            x: (B, T, input_dim) tensor for input to the Unet.
-            timestep: (B,) tensor of (timestep_we_are_denoising_from - 1).
-            global_cond: (B, global_cond_dim)
-            output: (B, T, input_dim)
+            timestep: (B,) tensor of diffusion timesteps
+            global_cond: (B, global_cond_dim) global conditioning from observations
         Returns:
-            (B, T, input_dim) diffusion model prediction.
+            (B, T_cond, embed_dim) conditioning memory
         """
-        # For 1D convolutions we'll need feature dimension first.
-        x = einops.rearrange(x, "b t d -> b d t")
+        # Time embedding: (B,) -> (B, 1, embed_dim)
+        time_emb = self.time_emb(timestep).unsqueeze(1)
+        
+        # Global conditioning: (B, global_cond_dim) -> (B, n_obs_steps, embed_dim)
+        # Reshape to match Stanford's expectation of n_obs_steps separate tokens
+        cond_obs_emb = self.cond_obs_emb(global_cond)
+        cond_obs_emb = cond_obs_emb.unsqueeze(1).expand(-1, self.config.n_obs_steps, -1)
+        
+        # Concatenate: [time_emb, cond_obs_emb] -> (B, 1 + n_obs_steps, embed_dim)
+        cond_embeddings = torch.cat([time_emb, cond_obs_emb], dim=1)
+        
+        # Add positional embeddings
+        tc = cond_embeddings.shape[1]
+        position_embeddings = self.cond_pos_emb[:, :tc, :]
+        x = self.drop(cond_embeddings + position_embeddings)
+        
+        # Apply encoder
+        memory = self.encoder(x)
+        return memory
 
-        timesteps_embed = self.diffusion_step_encoder(timestep)
 
-        # If there is a global conditioning feature, concatenate it to the timestep embedding.
-        if global_cond is not None:
-            global_feature = torch.cat([timesteps_embed, global_cond], axis=-1)
-        else:
-            global_feature = timesteps_embed
-
-        # Run encoder, keeping track of skip features to pass to the decoder.
-        encoder_skip_features: list[Tensor] = []
-        for resnet, resnet2, downsample in self.down_modules:
-            x = resnet(x, global_feature)
-            x = resnet2(x, global_feature)
-            encoder_skip_features.append(x)
-            x = downsample(x)
-
-        for mid_module in self.mid_modules:
-            x = mid_module(x, global_feature)
-
-        # Run decoder, using the skip features from the encoder.
-        for resnet, resnet2, upsample in self.up_modules:
-            x = torch.cat((x, encoder_skip_features.pop()), dim=1)
-            x = resnet(x, global_feature)
-            x = resnet2(x, global_feature)
-            x = upsample(x)
-
-        x = self.final_conv(x)
-
-        x = einops.rearrange(x, "b d t -> b t d")
+class DiffusionActionDecoder(nn.Module):
+    """Stanford-style action decoder with cross-attention to conditioning memory."""
+    
+    def __init__(self, config: DiffusionTransformerConfig, action_dim: int):
+        super().__init__()
+        self.config = config
+        
+        # Input embedding (Stanford's input_emb)
+        self.input_emb = nn.Linear(action_dim, config.attention_embed_dim)
+        
+        # Positional embedding (Stanford's pos_emb)
+        self.pos_emb = nn.Parameter(torch.zeros(1, config.horizon, config.attention_embed_dim))
+        
+        # Dropout
+        self.drop = nn.Dropout(config.embedding_dropout)
+        
+        # Decoder (Stanford's decoder)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=config.attention_embed_dim,
+            nhead=config.n_attention_heads,
+            dim_feedforward=4 * config.attention_embed_dim,
+            dropout=config.attention_dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True
+        )
+        self.decoder = nn.TransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=config.n_decoder_layers
+        )
+        
+        # Output layers (Stanford's ln_f + head)
+        self.ln_f = nn.LayerNorm(config.attention_embed_dim)
+        self.head = nn.Linear(config.attention_embed_dim, action_dim)
+    
+    def forward(self, sample: Tensor, memory: Tensor, tgt_mask: Tensor = None, memory_mask: Tensor = None) -> Tensor:
+        """
+        Args:
+            sample: (B, T, action_dim) noisy action sequence
+            memory: (B, T_cond, embed_dim) conditioning memory from encoder
+            tgt_mask: Causal mask for action sequence
+            memory_mask: Cross-attention mask between actions and conditioning
+        Returns:
+            (B, T, action_dim) denoised action predictions
+        """
+        # Stanford's decoder logic
+        token_embeddings = self.input_emb(sample)
+        t = token_embeddings.shape[1]
+        position_embeddings = self.pos_emb[:, :t, :]
+        x = self.drop(token_embeddings + position_embeddings)
+        
+        # Apply decoder with cross-attention
+        x = self.decoder(
+            tgt=x,
+            memory=memory,
+            tgt_mask=tgt_mask,
+            memory_mask=memory_mask
+        )
+        
+        # Output projection
+        x = self.ln_f(x)
+        x = self.head(x)
         return x
 
 
-class DiffusionConditionalResidualBlock1d(nn.Module):
-    """ResNet style 1D convolutional block with FiLM modulation for conditioning."""
+def _create_stanford_attention_masks(config: DiffusionTransformerConfig, device: torch.device):
+    """Create Stanford-style attention masks."""
+    T = config.horizon
+    T_cond = 1 + config.n_obs_steps
+    
+    # Causal mask for decoder (Stanford's mask)
+    mask = (torch.triu(torch.ones(T, T, device=device)) == 1).transpose(0, 1)
+    mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+    
+    # Memory mask for cross-attention (Stanford's memory_mask)
+    t, s = torch.meshgrid(torch.arange(T, device=device), torch.arange(T_cond, device=device), indexing='ij')
+    memory_mask = t >= (s - 1)  # add one dimension since time is first token
+    memory_mask = memory_mask.float().masked_fill(memory_mask == 0, float('-inf')).masked_fill(memory_mask == 1, float(0.0))
+    
+    return mask, memory_mask
 
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        cond_dim: int,
-        kernel_size: int = 3,
-        n_groups: int = 8,
-        # Set to True to do scale modulation with FiLM as well as bias modulation (defaults to False meaning
-        # FiLM just modulates bias).
-        use_film_scale_modulation: bool = False,
-    ):
+
+class DiffusionTransformer1d(nn.Module):
+    """Stanford-style encoder-decoder transformer for diffusion-based action sequence generation.
+    
+    Uses separate encoder for conditioning (timestep + observations) and decoder for action generation
+    with cross-attention, following the Stanford diffusion policy implementation.
+    """
+
+    def __init__(self, config: DiffusionTransformerConfig, global_cond_dim: int):
         super().__init__()
-
-        self.use_film_scale_modulation = use_film_scale_modulation
-        self.out_channels = out_channels
-
-        self.conv1 = DiffusionConv1dBlock(in_channels, out_channels, kernel_size, n_groups=n_groups)
-
-        # FiLM modulation (https://huggingface.co/papers/1709.07871) outputs per-channel bias and (maybe) scale.
-        cond_channels = out_channels * 2 if use_film_scale_modulation else out_channels
-        self.cond_encoder = nn.Sequential(nn.Mish(), nn.Linear(cond_dim, cond_channels))
-
-        self.conv2 = DiffusionConv1dBlock(out_channels, out_channels, kernel_size, n_groups=n_groups)
-
-        # A final convolution for dimension matching the residual (if needed).
-        self.residual_conv = (
-            nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
-        )
-
-    def forward(self, x: Tensor, cond: Tensor) -> Tensor:
-        """
-        Args:
-            x: (B, in_channels, T)
-            cond: (B, cond_dim)
-        Returns:
-            (B, out_channels, T)
-        """
-        out = self.conv1(x)
-
-        # Get condition embedding. Unsqueeze for broadcasting to `out`, resulting in (B, out_channels, 1).
-        cond_embed = self.cond_encoder(cond).unsqueeze(-1)
-        if self.use_film_scale_modulation:
-            # Treat the embedding as a list of scales and biases.
-            scale = cond_embed[:, : self.out_channels]
-            bias = cond_embed[:, self.out_channels :]
-            out = scale * out + bias
+        self.config = config
+        action_dim = config.action_feature.shape[0]
+        
+        # Stanford-style components
+        self.conditioning_encoder = DiffusionConditioningEncoder(config, global_cond_dim)
+        self.action_decoder = DiffusionActionDecoder(config, action_dim)
+        
+        # Stanford-style attention masks
+        if config.use_causal_attention:
+            # Note: masks will be created on the correct device in forward pass
+            self.register_buffer("_mask_template", torch.zeros(1))  # placeholder
+            self.register_buffer("_memory_mask_template", torch.zeros(1))  # placeholder
         else:
-            # Treat the embedding as biases.
-            out = out + cond_embed
+            self.mask = None
+            self.memory_mask = None
+        
+        # Initialize weights (Stanford's _init_weights equivalent)
+        self.apply(self._init_weights)
 
-        out = self.conv2(out)
-        out = out + self.residual_conv(x)
-        return out
+    def _init_weights(self, module):
+        """Initialize weights following Stanford conventions."""
+        ignore_types = (
+            nn.Dropout, 
+            DiffusionSinusoidalPosEmb, 
+            nn.TransformerEncoderLayer, 
+            nn.TransformerDecoderLayer,
+            nn.TransformerEncoder,
+            nn.TransformerDecoder,
+            nn.ModuleList,
+            nn.Mish,
+            nn.Sequential
+        )
+        
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.MultiheadAttention):
+            weight_names = ['in_proj_weight', 'q_proj_weight', 'k_proj_weight', 'v_proj_weight']
+            for name in weight_names:
+                weight = getattr(module, name)
+                if weight is not None:
+                    torch.nn.init.normal_(weight, mean=0.0, std=0.02)
+            
+            bias_names = ['in_proj_bias', 'bias_k', 'bias_v']
+            for name in bias_names:
+                bias = getattr(module, name)
+                if bias is not None:
+                    torch.nn.init.zeros_(bias)
+        elif isinstance(module, nn.LayerNorm):
+            torch.nn.init.zeros_(module.bias)
+            torch.nn.init.ones_(module.weight)
+        elif isinstance(module, DiffusionConditioningEncoder):
+            torch.nn.init.normal_(module.cond_pos_emb, mean=0.0, std=0.02)
+        elif isinstance(module, DiffusionActionDecoder):
+            torch.nn.init.normal_(module.pos_emb, mean=0.0, std=0.02)
+        elif isinstance(module, ignore_types):
+            pass
+        # Don't raise error for unaccounted modules to maintain compatibility
+
+    def forward(
+        self,
+        x: Tensor,
+        timestep: Tensor | int,
+        global_cond: Tensor | None = None,
+    ) -> Tensor:
+        """Stanford's forward pass logic.
+        
+        Args:
+            x: (B, T, action_dim) tensor for noisy action sequences
+            timestep: (B,) tensor of diffusion timesteps
+            global_cond: (B, global_cond_dim) global conditioning from observations
+        Returns:
+            (B, T, action_dim) denoised action predictions
+        """
+        device = x.device
+        
+        # Create attention masks on correct device
+        if self.config.use_causal_attention:
+            mask, memory_mask = _create_stanford_attention_masks(self.config, device)
+        else:
+            mask = None
+            memory_mask = None
+        
+        # Encode conditioning (timestep + observations) -> memory
+        memory = self.conditioning_encoder(timestep, global_cond)
+        
+        # Decode actions with cross-attention to memory
+        predictions = self.action_decoder(
+            sample=x,
+            memory=memory,
+            tgt_mask=mask,
+            memory_mask=memory_mask
+        )
+        
+        return predictions
