@@ -289,12 +289,12 @@ class HybridDiffusionPolicy(PreTrainedPolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training."""
-                batch = dict(batch)  # Shallow copy
+        batch = dict(batch)  # Shallow copy
 
         if self.config.image_features:
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
 
-                # Stage 1: Train VAE for discrete actions
+        # Stage 1: Train VAE for discrete actions
         if self.has_discrete and self.training_step < self.config.n_vae_training_steps:
             # Split concatenated action to get discrete part
             action = batch["action"]
@@ -348,7 +348,7 @@ class HybridDiffusionPolicy(PreTrainedPolicy):
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         """Predict a chunk of actions given environment observations."""
-                if self.config.image_features:
+        if self.config.image_features:
             batch = dict(batch)  # shallow copy
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
 
@@ -377,7 +377,7 @@ class HybridDiffusionPolicy(PreTrainedPolicy):
             if action_key in batch:
                 batch.pop(action_key)
 
-                if self.config.image_features:
+        if self.config.image_features:
             batch = dict(batch)  # shallow copy
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
 

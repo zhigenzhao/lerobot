@@ -115,7 +115,7 @@ class FlowMatchingDiTPolicy(PreTrainedPolicy):
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
         """Predict a chunk of actions given environment observations."""
         # Normalize and prepare batch
-                if self.config.image_features:
+        if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
 
@@ -142,13 +142,13 @@ class FlowMatchingDiTPolicy(PreTrainedPolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
         """Forward pass for training."""
-                # Prepare inputs
+        # Prepare inputs
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
 
         # Normalize target actions
-                # Forward pass through flow matching model
+        # Forward pass through flow matching model
         loss = self.flow_matching.compute_loss(batch)
 
         # no output_dict so returning None

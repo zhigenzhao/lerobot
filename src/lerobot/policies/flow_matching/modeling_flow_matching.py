@@ -113,7 +113,7 @@ class FlowMatchingPolicy(PreTrainedPolicy):
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
         """Predict a chunk of actions given environment observations."""
         # Normalize and prepare batch
-                if self.config.image_features:
+        if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
 
@@ -151,7 +151,7 @@ class FlowMatchingPolicy(PreTrainedPolicy):
         if ACTION in batch:
             batch.pop(ACTION)
 
-                if self.config.image_features:
+        if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
         # NOTE: It's important that this happens after stacking the images into a single key.
@@ -168,13 +168,13 @@ class FlowMatchingPolicy(PreTrainedPolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training or validation."""
-                batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+        batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
         if self.config.image_features:
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
         if self.config.env_state_feature:
             # Note: we don't need to change OBS_ENV_STATE key because DiffusionModel expects it as is
             pass
-                loss = self.flow_matching.compute_loss(batch)
+        loss = self.flow_matching.compute_loss(batch)
         return loss, {}
 
 

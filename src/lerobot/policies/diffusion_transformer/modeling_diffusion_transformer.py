@@ -95,7 +95,7 @@ class DiffusionTransformerPolicy(PreTrainedPolicy):
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
         """Predict a chunk of actions given environment observations."""
         # Normalize and prepare batch
-                if self.config.image_features:
+        if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
 
@@ -133,7 +133,7 @@ class DiffusionTransformerPolicy(PreTrainedPolicy):
         if ACTION in batch:
             batch.pop(ACTION)
 
-                if self.config.image_features:
+        if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
         # NOTE: It's important that this happens after stacking the images into a single key.
@@ -150,10 +150,10 @@ class DiffusionTransformerPolicy(PreTrainedPolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
         """Run the batch through the model and compute the loss for training or validation."""
-                if self.config.image_features:
+        if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-                loss = self.diffusion.compute_loss(batch)
+        loss = self.diffusion.compute_loss(batch)
         # no output_dict so returning None
         return loss, None
 
