@@ -241,13 +241,19 @@ class DiffusionModel(nn.Module):
         global_cond_feats = [batch[OBS_STATE]]
         # Extract image features.
         if self.config.image_features:
+            images = batch[OBS_IMAGES]
+            # Ensure images have (B, S, N, C, H, W) shape. When n_obs_steps=1,
+            # lerobot's dataset squeezes the time dim, leaving (B, N, C, H, W).
+            if images.ndim == 5:
+                images = images.unsqueeze(1)
+
             if self.config.use_separate_rgb_encoder_per_camera:
                 # Combine batch and sequence dims while rearranging to make the camera index dimension first.
-                images_per_camera = einops.rearrange(batch[OBS_IMAGES], "b s n ... -> n (b s) ...")
+                images_per_camera = einops.rearrange(images, "b s n ... -> n (b s) ...")
                 img_features_list = torch.cat(
                     [
-                        encoder(images)
-                        for encoder, images in zip(self.rgb_encoder, images_per_camera, strict=True)
+                        encoder(cam_images)
+                        for encoder, cam_images in zip(self.rgb_encoder, images_per_camera, strict=True)
                     ]
                 )
                 # Separate batch and sequence dims back out. The camera index dim gets absorbed into the
@@ -258,7 +264,7 @@ class DiffusionModel(nn.Module):
             else:
                 # Combine batch, sequence, and "which camera" dims before passing to shared encoder.
                 img_features = self.rgb_encoder(
-                    einops.rearrange(batch[OBS_IMAGES], "b s n ... -> (b s n) ...")
+                    einops.rearrange(images, "b s n ... -> (b s n) ...")
                 )
                 # Separate batch dim and sequence dim back out. The camera index dim gets absorbed into the
                 # feature dim (effectively concatenating the camera features).
