@@ -383,6 +383,40 @@ def _make_env_fns(
     return fns
 
 
+# ---- Lazy env wrapper --------------------------------------------------------
+
+
+class _LazyVecEnv:
+    """Defers vectorized-env construction until the env is actually used.
+
+    This avoids OOM when a benchmark has many tasks (e.g. libero_90 = 90 tasks)
+    because only the environments that are actively being evaluated need to live
+    in memory at the same time.
+    """
+
+    def __init__(self, env_cls, fns, suite_name: str, task_id: int, n_envs: int):
+        self._env_cls = env_cls
+        self._fns = fns
+        self._suite_name = suite_name
+        self._task_id = task_id
+        self._n_envs = n_envs
+        self._env = None
+
+    def _ensure_built(self):
+        if self._env is None:
+            self._env = self._env_cls(self._fns)
+            print(f"Built vec env | suite={self._suite_name} | task_id={self._task_id} | n_envs={self._n_envs}")
+        return self._env
+
+    def close(self):
+        if self._env is not None:
+            self._env.close()
+            self._env = None
+
+    def __getattr__(self, name):
+        return getattr(self._ensure_built(), name)
+
+
 # ---- Main API ----------------------------------------------------------------
 
 
@@ -445,8 +479,10 @@ def create_libero_envs(
                 gym_kwargs=gym_kwargs,
                 control_mode=control_mode,
             )
-            out[suite_name][tid] = env_cls(fns)
-            print(f"Built vec env | suite={suite_name} | task_id={tid} | n_envs={n_envs}")
+            out[suite_name][tid] = _LazyVecEnv(env_cls, fns, suite_name, tid, n_envs)
+
+    n_tasks = sum(len(v) for v in out.values())
+    print(f"Registered {n_tasks} lazy envs (will be built on first use)")
 
     # return plain dicts for predictability
     return {suite: dict(task_map) for suite, task_map in out.items()}

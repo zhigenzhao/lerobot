@@ -755,6 +755,10 @@ def eval_policy_all(
             tg, tid, metrics = task_runner(task_group, task_id, env)
             _accumulate_to(tg, metrics)
             per_task_infos.append({"task_group": tg, "task_id": tid, "metrics": metrics})
+            # Free memory after each task (important for large benchmarks like libero_90
+            # where keeping all envs alive simultaneously causes OOM).
+            if hasattr(env, "close"):
+                env.close()
     else:
         # threaded path: submit all tasks, consume completions on main thread and accumulate there
         with cf.ThreadPoolExecutor(max_workers=max_parallel_tasks) as executor:
