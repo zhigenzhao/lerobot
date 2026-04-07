@@ -15,6 +15,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import ctypes
 import gc
 import os
 from collections import defaultdict
@@ -415,6 +416,11 @@ class _LazyVecEnv:
             self._env = None
         self._fns = None
         gc.collect()
+        # Force glibc to return freed C pages to OS (MuJoCo allocations)
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except OSError:
+            pass
 
     def __getattr__(self, name):
         return getattr(self._ensure_built(), name)
