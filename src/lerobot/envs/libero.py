@@ -15,6 +15,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import gc
 import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -412,6 +413,8 @@ class _LazyVecEnv:
         if self._env is not None:
             self._env.close()
             self._env = None
+        self._fns = None
+        gc.collect()
 
     def __getattr__(self, name):
         return getattr(self._ensure_built(), name)
